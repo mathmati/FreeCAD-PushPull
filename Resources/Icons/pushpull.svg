@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <style>
+      .face  { fill:#7fb3d9; stroke:#3d6d8f; stroke-width:1.5; }
+      .side  { fill:#5c93bd; stroke:#3d6d8f; stroke-width:1.2; }
+      .top   { fill:#9fc9e8; stroke:#3d6d8f; stroke-width:1.2; }
+      .arrow { fill:none; stroke:#c0392b; stroke-width:3.5; stroke-linecap:round; stroke-linejoin:round; }
+    </style>
+  </defs>
+
+  <!-- base cube (isometric) -->
+  <polygon class="top"  points="14,22 32,12 50,22 32,32" />
+  <polygon class="side" points="14,22 32,32 32,50 14,40" />
+  <polygon class="face" points="32,32 50,22 50,40 32,50" />
+
+  <!-- push/pull arrow along the normal of the top face -->
+  <path class="arrow" d="M32 4 L32 18" />
+  <path class="arrow" d="M26 9 L32 3 L38 9" />
+</svg>
