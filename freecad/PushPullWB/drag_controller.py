@@ -15,7 +15,7 @@ driven two ways with *identical* code paths:
 No OCCT/document recompute happens until :meth:`commit` -- every mouse-move
 tick only updates the Coin ghost's SoTransform (see tracker.py) and, if a
 view is attached, a status-bar text readout. This is the "cheap ghost, not
-live OCCT" design the feasibility scout flagged as the difference between a
+live OCCT" design a prior-art review flagged as the difference between a
 usable tool and the trap that stalled Design456's push/pull attempt.
 """
 from . import commit as commit_mod

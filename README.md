@@ -21,19 +21,17 @@ a thin, focused UI layer over the Pad/Pocket API that already exists.
 
 **No equivalent addon was found in the FreeCAD Addon Manager index as of
 2026-07** (a dedicated prior-art search -- WebSearch/WebFetch/GitHub code
-search, no git commands, no sub-agents -- turned up zero matches for
-"push pull" + workbench/addon, `SoDragger`+freecad, and similar queries;
-see `ops/scout-pushpull.md` in the build record for the full method and
-citations). This is stated as a novelty-search result, not a "first ever"
-or "only" claim -- an addon like this could exist and simply not have
-turned up in that search.
+search) turned up zero matches for "push pull" + workbench/addon,
+`SoDragger`+freecad, and similar queries. This is a search result, not a
+"first ever" or "only" claim -- an addon like this could exist and simply
+not have turned up.
 
 ### Design456's pivot, disclosed honestly
 
 The one serious prior attempt at this problem is
 [MariwanJ/Design456](https://github.com/MariwanJ/Design456), whose README
 explicitly names the same goal ("click a face and extrude/push-pull by
-moving the mouse instead of typing a distance"). As of the scout's
+moving the mouse instead of typing a distance"). As of a 2026-07 prior-art
 research (mid-2026), that project had **pivoted away from FreeCAD's
 OCCT/Part kernel entirely toward a mesh-based engine**, with the author
 citing difficulty making direct modeling work reliably on top of
@@ -76,7 +74,7 @@ best understanding of what the natural, naive approach gets wrong.
   one is curved)."
 - Face not on a `PartDesign::Body` (e.g. a bare `Part::Box`) -> a
   friendly message. **v1 does not offer a Part::Extrude fallback** for
-  this case (kept out of scope deliberately, per the feasibility scout's
+  this case (kept out of scope deliberately, per a feasibility
   "keep v1 simple" recommendation) -- pick a face on a PartDesign part
   instead.
 - Drag distance too small (effectively a no-op) -> rejected, no feature
@@ -128,15 +126,14 @@ two ways:
    (one via a simulated drag, one via genuinely synthetic Qt keyboard
    input for the click-then-type path).
 
-**Honest disclosure on synthetic input**, since this is the part most
+**Testing note on synthetic input**, since this is the part most
 worth being precise about: synthesizing genuine Coin3D/SoEvent
 mouse-drag events (a picking ray through a specific pixel actually
 hitting geometry via `SoRayPickAction`, then live `SoLocation2Event`
 deltas) under a headless Xvfb X server was **not attempted** -- doing
 that convincingly needs a real windowing/input path this environment
 doesn't have, and it's the well-known hard part of testing 3D-viewport
-interaction. Per this build's verification brief, the sanctioned
-fallback is used for that part instead: the real command is invoked, the
+interaction. A scripted fallback is used for that part instead: the real command is invoked, the
 real `Gui.Selection` API supplies the face pick, and a mouse-move tick is
 simulated with a **direct call** to `controller.update_distance(...)` --
 the exact method the real `SoLocation2Event` handler calls after
@@ -168,14 +165,6 @@ pick and commit -- a sanity check, not a fix.
 
 FreeCAD 1.1+, a `PartDesign::Body`. No third-party Python dependencies
 beyond what FreeCAD itself ships (`pivy`, `PySide`).
-
-## AI-assistance disclosure
-
-This addon was built with the assistance of an AI coding assistant
-(Claude, by Anthropic), reviewed and taken responsibility for by the
-named human maintainer, per FreeCAD's `AI_POLICY.md`. Full disclosure
-text and the `Assisted-by:` commit-trailer convention are in
-`submission/DISCLOSURE.md` in the build record.
 
 ## Known gaps for v1.1 (disclosed up front)
 

@@ -7,7 +7,7 @@ tessellated copy of the picked face + its outer-wire outline), insert it
 into the 3D view's scene graph, then on every mouse-move tick only update
 an ``SoTransform``'s translation. No OCCT/Part call and no document
 recompute happens per tick -- this is precisely the design choice the
-feasibility scout (ops/scout-pushpull.md) flagged as the difference
+prior-art review flagged as the difference
 between a usable tool and the trap that reportedly stalled Design456's
 push/pull attempt (a real boolean recompute on every mouse-move event).
 

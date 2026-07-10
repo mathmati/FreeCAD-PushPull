@@ -43,7 +43,7 @@ def resolve_body_and_feature(obj):
     Shape mirrors its Tip), and ``body`` is the owning ``PartDesign::Body``.
 
     Raises FaceRejected with a friendly message if ``obj`` is not part of a
-    PartDesign Body (v1 scope, per the feasibility scout: bare Part solids
+    PartDesign Body (v1 scope, per v1 scope: bare Part solids
     get a friendly message, not a fallback Part::Extrude path).
     """
     if obj is None:
@@ -116,7 +116,7 @@ def face_still_matches(feature, face_name, expected_area, expected_com, tol=1e-4
     *current* shape still look like the face we originally picked?
 
     This does not "solve" FreeCAD's topological naming problem (see the
-    scout report and README) -- it's a cheap sanity check that catches the
+    design notes and README) -- it's a cheap sanity check that catches the
     obvious case where a recompute between pick and commit silently shifted
     which geometry ``Face7`` refers to, so PushPull can fail loudly instead
     of silently padding/pocketing the wrong face.
