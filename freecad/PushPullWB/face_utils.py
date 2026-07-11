@@ -65,9 +65,11 @@ def resolve_body_and_feature(obj):
             break
     if body is None:
         raise FaceRejected(
-            "PushPull only works on a face of a PartDesign Body's tip solid. "
-            "This object isn't part of a Body (v1 doesn't offer a Part "
-            "Extrude fallback yet) -- pick a face on a PartDesign part instead."
+            "PushPull works on a face of a PartDesign Body's tip solid, or a "
+            "standalone drawn face (which it extrudes into a solid). This is a "
+            "face of a bare non-Body solid, which needs a boolean to push in "
+            "place and isn't supported yet -- use a PartDesign Body, or draw a "
+            "loose face (e.g. with SketchLayer/Draft)."
         )
     if body.Tip is None:
         raise FaceRejected("PushPull: this Body has no tip feature yet.")
@@ -78,22 +80,39 @@ def validate_pick(obj, sub_name):
     """Validate a (obj, sub_element_name) pick from Gui.Selection/
     preselection for use as a PushPull drag start.
 
-    Returns a dict describing the validated pick:
-        body, feature, face_name, face (Part.Face, resolved via
-        feature.getSubObject), origin (Vector, face center of mass),
-        normal (Vector, outward unit normal).
+    Two accepted cases:
+      * a planar face on a **PartDesign Body**'s tip solid -> committed as a
+        parametric Pad/Pocket (``standalone`` False, ``body`` set);
+      * a **standalone planar face** on any other object (a bare Part::Feature
+        face, e.g. one drawn by the SketchLayer addon or Draft) -> committed
+        as a parametric ``Part::Extrusion`` into a solid (``standalone`` True,
+        ``body`` None). This is the SketchUp "draw a face, then push it up"
+        path (added v0.2.0).
 
-    Raises FaceRejected with a user-facing message on any problem
-    (non-face sub-element, non-planar face, face not on a Body).
+    Raises FaceRejected with a user-facing message on any problem (non-face
+    sub-element, non-planar face, nothing selected).
     """
+    if obj is None:
+        raise FaceRejected("PushPull: nothing selected.")
     if not sub_name or not sub_name.startswith("Face"):
         raise FaceRejected("PushPull: select a face, not an edge or vertex.")
 
-    body, feature = resolve_body_and_feature(obj)
+    try:
+        body, feature = resolve_body_and_feature(obj)
+        standalone = False
+    except FaceRejected:
+        # The standalone-extrude path applies to a LOOSE planar face -- an
+        # object whose shape carries no solid (a Part::Feature face/shell as
+        # drawn by SketchLayer or Draft). A face of a bare *solid* would need
+        # a boolean to push/pull in place and remains out of scope.
+        shape = getattr(obj, "Shape", None)
+        if shape is not None and len(shape.Solids) > 0:
+            raise
+        body, feature, standalone = None, obj, True
 
     sub = feature.getSubObject(sub_name)
     if sub is None or not isinstance(sub, Part.Face):
-        raise FaceRejected("PushPull: could not resolve that face on the Body's tip solid.")
+        raise FaceRejected("PushPull: could not resolve that face.")
 
     if not is_planar_face(sub):
         raise FaceRejected("PushPull only supports planar faces (this one is curved).")
@@ -104,6 +123,7 @@ def validate_pick(obj, sub_name):
     return {
         "body": body,
         "feature": feature,
+        "standalone": standalone,
         "face_name": sub_name,
         "face": sub,
         "origin": origin,

@@ -64,6 +64,12 @@ best understanding of what the natural, naive approach gets wrong.
      `Profile=(feature, ['FaceN'])` -- no Sketch object is created, and
      no data is duplicated; this is documented, current FreeCAD Pad/
      Pocket behavior, not a workaround.
+   - Picking a **standalone drawn face** (a loose planar `Part` face that
+     belongs to no Body -- exactly what the companion **SketchLayer**
+     addon, or Draft, produces) instead commits a parametric
+     `Part::Extrusion` into a solid. This is the SketchUp loop: *draw a
+     rectangle, then push it up into a box.* The extrusion stays editable
+     (`LengthFwd`) like a Pad.
 5. **Esc** at any point cancels cleanly: the Coin ghost is removed, all
    event callbacks/filters are torn down, and the document is left
    completely unchanged.
@@ -72,11 +78,12 @@ best understanding of what the natural, naive approach gets wrong.
 
 - Non-planar face picked -> "PushPull only supports planar faces (this
   one is curved)."
-- Face not on a `PartDesign::Body` (e.g. a bare `Part::Box`) -> a
-  friendly message. **v1 does not offer a Part::Extrude fallback** for
-  this case (kept out of scope deliberately, per a feasibility
-  "keep v1 simple" recommendation) -- pick a face on a PartDesign part
-  instead.
+- Face on a bare **non-Body solid** (e.g. a `Part::Box`) -> a friendly
+  message. Pushing an existing solid's face in place needs a boolean,
+  which is still out of scope; use a PartDesign Body for that, or draw a
+  loose face. (A *standalone* loose face is accepted -- see step 4's
+  `Part::Extrusion` path above; only faces belonging to an existing bare
+  solid are declined.)
 - Drag distance too small (effectively a no-op) -> rejected, no feature
   created.
 - A defensive re-check at commit time compares the picked face's area
@@ -166,13 +173,17 @@ pick and commit -- a sanity check, not a fix.
 FreeCAD 1.1+, a `PartDesign::Body`. No third-party Python dependencies
 beyond what FreeCAD itself ships (`pivy`, `PySide`).
 
-## Known gaps for v1.1 (disclosed up front)
+## Known gaps (disclosed up front)
 
-- No `Part::Extrude` fallback for faces on bare (non-Body) `Part`
-  solids -- friendly message only (deliberate v1 scope cut).
-- No rectangle-on-face-to-new-sketch mode (SketchUp's "draw a shape on
-  a face" gesture) -- this addon only pushes/pulls a face that already
-  exists.
+- No in-place push/pull of a face on an existing bare (non-Body) solid --
+  that needs a boolean and is still out of scope (a *standalone* loose
+  face is extruded; a face of an existing bare solid is declined with a
+  friendly message).
+- No rectangle-on-face-to-new-sketch mode (SketchUp's "draw a shape on a
+  face" gesture) itself -- but you can now *draw* the face to push/pull
+  with FreeCAD's Draft workbench (whose snapping is itself SketchUp-
+  inspired) or the companion **SketchLayer** addon, then Push/Pull the
+  resulting loose face into a solid.
 - Only one face can be dragged per command activation; re-activate (or
   re-invoke) to push/pull another face.
 - Not internationalized (UI strings are plain Python, not

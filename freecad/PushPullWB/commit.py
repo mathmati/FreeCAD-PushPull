@@ -67,3 +67,48 @@ def commit_pushpull(doc, body, feature, face_name, distance, name_hint="PushPull
         )
 
     return new_obj
+
+
+def commit_extrude(doc, feature, normal, distance, name_hint="PushPull"):
+    """Commit a standalone planar face (a bare ``Part::Feature`` face, e.g.
+    drawn by the SketchLayer addon or Draft -- one that belongs to no
+    PartDesign Body) as a parametric ``Part::Extrusion`` into a solid, along
+    the face's outward normal by ``distance`` (negative = extrude the other
+    way). Returns the new ``Part::Extrusion`` object. Recomputes the document.
+
+    Kept parametric on purpose (``Base`` + ``LengthFwd`` stay editable after
+    the fact) so a SketchUp-drawn face pushed into a box remains adjustable,
+    exactly like a Pad. On an invalid result the half-built feature is
+    removed so the document is left unchanged.
+    """
+    if abs(distance) < MIN_LENGTH:
+        raise CommitError("PushPull: drag distance too small, nothing to commit.")
+
+    ext = doc.addObject("Part::Extrusion", name_hint)
+    ext.Base = feature
+    ext.DirMode = "Custom"
+    ext.Dir = App.Vector(normal)
+    ext.LengthFwd = abs(distance)
+    ext.Reversed = distance < 0
+    ext.Solid = True
+    ext.Symmetric = False
+    try:
+        doc.recompute()
+    except Exception as exc:
+        doc.removeObject(ext.Name)
+        doc.recompute()
+        raise CommitError(f"PushPull: recompute failed ({exc}); commit aborted.")
+
+    shape_ok = True
+    try:
+        shape_ok = ext.Shape.isValid() and not ext.Shape.isNull() and len(ext.Shape.Solids) >= 1
+    except Exception:
+        shape_ok = False
+    if "Invalid" in list(getattr(ext, "State", [])) or not shape_ok:
+        doc.removeObject(ext.Name)
+        doc.recompute()
+        raise CommitError(
+            "PushPull: could not extrude that face into a valid solid; "
+            "check the face is planar and the distance is non-zero."
+        )
+    return ext

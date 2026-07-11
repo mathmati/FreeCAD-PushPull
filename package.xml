@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8" standalone="no" ?>
 <package format="1" xmlns="https://wiki.freecad.org/Package_Metadata">
   <name>PushPull</name>
-  <description>SketchUp-style direct modeling for FreeCAD: click a planar face on a PartDesign Body, drag along its normal with a live ghost preview and numeric readout, release (or type a distance and press Enter) to commit a real parametric PartDesign Pad (outward) or Pocket (inward). No live OCCT recompute during the drag -- only a cheap Coin3D ghost is updated per mouse tick.</description>
-  <version>0.1.0</version>
-  <date>2026-07-10</date>
+  <description>SketchUp-style direct modeling for FreeCAD: click a planar face, drag along its normal with a live ghost preview and numeric readout, release (or type a distance and press Enter) to commit a real parametric feature. A face on a PartDesign Body becomes a Pad (outward) or Pocket (inward); a standalone drawn face (e.g. from the SketchLayer addon or Draft) is extruded into a solid. No live OCCT recompute during the drag -- only a cheap Coin3D ghost is updated per mouse tick.</description>
+  <version>0.2.0</version>
+  <date>2026-07-11</date>
   <maintainer email="177616452+mathmati@users.noreply.github.com">mathmati</maintainer>
   <license file="LICENSE-Code">MIT</license>
   <url type="repository" branch="main">https://github.com/mathmati/FreeCAD-PushPull</url>

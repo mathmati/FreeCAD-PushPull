@@ -50,6 +50,7 @@ class PushPullController:
         self.active = False
         self.body = None
         self.feature = None
+        self.standalone = False
         self.face_name = None
         self.origin = None
         self.normal = None
@@ -80,6 +81,7 @@ class PushPullController:
         self.reset()
         self.body = pick["body"]
         self.feature = pick["feature"]
+        self.standalone = pick["standalone"]
         self.face_name = pick["face_name"]
         self.origin = pick["origin"]
         self.normal = pick["normal"]
@@ -189,9 +191,13 @@ class PushPullController:
             self._teardown()
             return None
 
-        body, feature, face_name = self.body, self.feature, self.face_name
         try:
-            new_obj = commit_mod.commit_pushpull(self.doc, body, feature, face_name, distance)
+            if self.standalone:
+                new_obj = commit_mod.commit_extrude(
+                    self.doc, self.feature, self.normal, distance)
+            else:
+                new_obj = commit_mod.commit_pushpull(
+                    self.doc, self.body, self.feature, self.face_name, distance)
         except commit_mod.CommitError as exc:
             self.last_message = str(exc)
             self._teardown()
@@ -222,7 +228,10 @@ class PushPullController:
         try:
             import FreeCADGui as Gui
 
-            kind = "Pad" if self.distance >= 0 else "Pocket"
+            if self.standalone:
+                kind = "Extrude"
+            else:
+                kind = "Pad" if self.distance >= 0 else "Pocket"
             typed = f" [typed: {self.typed_buffer}]" if self.typed_buffer else ""
             msg = f"PushPull: {kind} {abs(self.distance):.3g} mm{typed}  (Enter=commit, Esc=cancel)"
             Gui.getMainWindow().statusBar().showMessage(msg)
