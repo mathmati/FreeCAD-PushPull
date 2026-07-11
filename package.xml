@@ -5,7 +5,7 @@
   <version>0.2.0</version>
   <date>2026-07-11</date>
   <maintainer email="177616452+mathmati@users.noreply.github.com">mathmati</maintainer>
-  <license file="LICENSE-Code">MIT</license>
+  <license file="LICENSE">MIT</license>
   <url type="repository" branch="main">https://github.com/mathmati/FreeCAD-PushPull</url>
   <url type="readme">https://github.com/mathmati/FreeCAD-PushPull/raw/main/README.md</url>
   <url type="bugtracker">https://github.com/mathmati/FreeCAD-PushPull/issues</url>

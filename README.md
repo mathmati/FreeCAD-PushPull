@@ -195,4 +195,4 @@ beyond what FreeCAD itself ships (`pivy`, `PySide`).
 
 ## License
 
-MIT, see `LICENSE-Code`.
+MIT, see `LICENSE`.
