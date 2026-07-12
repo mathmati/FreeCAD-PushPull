@@ -196,3 +196,7 @@ beyond what FreeCAD itself ships (`pivy`, `PySide`).
 ## License
 
 MIT, see `LICENSE`.
+
+## Transparency
+
+Built with [Claude Code](https://claude.com/claude-code).
