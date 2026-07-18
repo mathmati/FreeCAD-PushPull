@@ -41,6 +41,18 @@ useful signal about where the difficulty in this problem actually lives
 choice deliberately (see "No live OCCT recompute" below), which is our
 best understanding of what the natural, naive approach gets wrong.
 
+### What core FreeCAD does and doesn't have (as of 1.1)
+
+FreeCAD 1.1 added interactive gizmos (on by default): while a Pad, Pocket,
+Fillet or similar feature is being created or edited in its task dialog, you
+can drag an arrow in the 3D view to set its length with a live preview. That
+is parameter dragging on an already-defined, sketch-based feature. It cannot
+start from a bare face, creates no feature by itself, and still commits
+through the dialog. PushPull is the complementary face-first gesture: click a
+face, drag, release, done. FreeCAD's own tracking issue for Fusion-style
+drag-to-edit ([#6204](https://github.com/FreeCAD/FreeCAD/issues/6204))
+remains open.
+
 ## What it does (v1 scope)
 
 1. Activate the **Push/Pull** command (toolbar/menu, in its own
