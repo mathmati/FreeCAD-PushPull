@@ -75,13 +75,28 @@ remains open.
    - Both use the picked face **directly as the Profile** --
      `Profile=(feature, ['FaceN'])` -- no Sketch object is created, and
      no data is duplicated; this is documented, current FreeCAD Pad/
-     Pocket behavior, not a workaround.
+     Pocket behavior, not a workaround. A face with holes keeps its
+     holes.
+   - Pushing **inward all the way to the opposite face** stops there
+     (SketchUp's "offset is limited"): the drag clamps at the back face,
+     snapping onto it from just short, and committing there emits a
+     Pocket with `Type='ThroughAll'` -- a real through-hole, not a
+     paper-thin membrane left by an almost-deep-enough cut. This applies
+     to the interactive drag only; a typed distance is always committed
+     verbatim.
    - Picking a **standalone drawn face** (a loose planar `Part` face that
      belongs to no Body -- exactly what the companion **SketchLayer**
-     addon, or Draft, produces) instead commits a parametric
-     `Part::Extrusion` into a solid. This is the SketchUp loop: *draw a
-     rectangle, then push it up into a box.* The extrusion stays editable
-     (`LengthFwd`) like a Pad.
+     addon, or Draft, produces) seeds a new `PartDesign::Body`: a hidden
+     `SubShapeBinder` captures exactly the picked face, and a Pad
+     extrudes it. This is the SketchUp loop: *draw a rectangle, then
+     push it up into a box.* Because only the picked face is captured,
+     holes survive, and an object holding several loose faces (a ring
+     plus the disc that split it, say) no longer gets extruded wholesale
+     with its hole filled in. The result is an ordinary Body, so every
+     later push/pull on it goes through the normal Pad/Pocket path
+     above. A geometrically invalid source face (wrongly oriented inner
+     wire, which scripted or imported geometry sometimes has) is rebuilt
+     with `Part::FaceMakerBullseye` into a hidden helper feature first.
 5. **Esc** at any point cancels cleanly: the Coin ghost is removed, all
    event callbacks/filters are torn down, and the document is left
    completely unchanged.
@@ -94,8 +109,8 @@ remains open.
   message. Pushing an existing solid's face in place needs a boolean,
   which is still out of scope; use a PartDesign Body for that, or draw a
   loose face. (A *standalone* loose face is accepted -- see step 4's
-  `Part::Extrusion` path above; only faces belonging to an existing bare
-  solid are declined.)
+  seeded-Body path above; only faces belonging to an existing bare solid
+  are declined.)
 - Drag distance too small (effectively a no-op) -> rejected, no feature
   created.
 - A defensive re-check at commit time compares the picked face's area
@@ -109,13 +124,16 @@ remains open.
 This is the one design decision that matters most, and it's a direct
 response to what the Design456 story suggests went wrong for the natural
 approach: **the live drag preview never touches the document or the
-OCCT kernel.** At drag-start, the picked face's outline and a coarse
-tessellated fill are captured *once* (`Part.Face.tessellate()` /
-`.OuterWire.discretize()`) and built into a small Coin3D scene-graph
-node (mirroring the pattern core Draft's own
-`draftguitools/gui_trackers.py` uses for its rubber-band previews). Every
-subsequent mouse-move tick only updates that node's `SoTransform`
-translation -- a cheap, constant-time GPU-side operation regardless of
+OCCT kernel.** At drag-start, every wire of the picked face is
+discretized and a coarse tessellated fill is captured *once*
+(`Part.Face.tessellate()` / `Wire.discretize()`) and built into a small
+Coin3D scene-graph node (mirroring the pattern core Draft's own
+`draftguitools/gui_trackers.py` uses for its rubber-band previews). The
+ghost previews the whole prism being extruded: the static base outline
+(hole outlines included), the same outlines riding a transform at the
+live distance, and the side edges connecting them. Every subsequent
+mouse-move tick only updates that transform's translation plus the side
+edges' far endpoints -- no geometry is rebuilt per tick, regardless of
 model complexity. The real `PartDesign::Pad`/`Pocket` feature, and the
 one-time `Document.recompute()` it triggers, is only created **once, on
 release** (or Enter). This is also how Fusion 360/SolidWorks' own "live"
@@ -137,9 +155,12 @@ two ways:
    `PartDesign::Pocket`. Also covers the guards above, a cancel path
    that leaves the document untouched, single-undo-step commits with
    rollback of failed ones (including `Body.Tip` restoration), the
-   stale-selection refusal, Reversed-face normals, ghost-tracker
-   lifecycle and the single-session/key-filter teardown rules.
-   37/37 checks pass.
+   stale-selection refusal, Reversed-face normals with exact volumes both
+   directions, the seeded-Body loose-face path (holes preserved to exact
+   volumes, chained follow-up pulls, the invalid-face rebuild, wreckage
+   rollback), back-face detection and the push-through clamp/ThroughAll
+   commit, the ghost outline/side-edge helpers, ghost-tracker lifecycle
+   and the single-session/key-filter teardown rules. 48/48 checks pass.
 2. **GUI, under Xvfb** -- `verify/drivers/pushpull_drag_driver.py` and
    `pushpull_commit_driver.py` invoke the *real* `PushPullCommand` class
    (`Activated()`, exactly what a toolbar click runs) against a real 3D
@@ -193,8 +214,10 @@ beyond what FreeCAD itself ships (`pivy`, `PySide`).
 
 - No in-place push/pull of a face on an existing bare (non-Body) solid --
   that needs a boolean and is still out of scope (a *standalone* loose
-  face is extruded; a face of an existing bare solid is declined with a
-  friendly message).
+  face is seeded into a Body instead; a face of a pre-existing bare solid
+  is declined with a friendly message). Since a loose-face pull now
+  produces a Body rather than a bare `Part::Extrusion`, the addon's own
+  output no longer runs into this limit.
 - No rectangle-on-face-to-new-sketch mode (SketchUp's "draw a shape on a
   face" gesture) itself -- but you can now *draw* the face to push/pull
   with FreeCAD's Draft workbench (whose snapping is itself SketchUp-

@@ -5,7 +5,7 @@ Run from the repo root:
 
     freecadcmd verify/headless_regression.py
 
-Exit code 0 and a final "37/37 checks pass" line when green.
+Exit code 0 and a final "48/48 checks pass" line when green.
 
 Drives the Gui-decoupled ``PushPullController`` by method call -- the same
 object the real SoEvent/Qt callbacks drive: "the user dragged 5 mm" is
@@ -24,30 +24,49 @@ Checks (one shared document; order matters):
                               normal (probed: normalAt already applies
                               Orientation; the old extra flip inverted the
                               drag axis on every Reversed face)
-  controller          10-17   typed buffer rules, cancel, too-small commit,
+  controller          10-18   typed buffer rules, cancel, too-small commit,
                               typed commit as Pad, undo as ONE step, pocket,
-                              Reversed bottom face pads downward end-to-end
-  session leaks       18-20   restart/cancel remove a leftover ghost, commit
+                              Reversed bottom face pads downward / pockets
+                              upward end-to-end with exact volumes
+  session leaks       19-21   restart/cancel remove a leftover ghost, commit
                               clears active
-  stale selection     21-23   old-feature pick after a tip change is refused
+  stale selection     22-24   old-feature pick after a tip change is refused
                               (probed: "Face6" silently named a different
                               face), tip/body picks still accepted
-  commit rollback     24-28   failed commit aborts its transaction, leaves no
+  commit rollback     25-29   failed commit aborts its transaction, leaves no
                               half-built feature, restores Body.Tip (probed:
                               removeObject left Tip None) under UndoMode 1
                               and UndoMode 0, Body still usable afterwards
-  commit_extrude      29-31   loose face -> solid Part::Extrusion, undoable,
-                              reversed direction, too-small refusal
-  Qt key routing      32-35   Ctrl/Alt chords neither swallowed nor typed,
+  commit_seed_body    30-36   loose face seeds a PartDesign Body (hidden
+                              SubShapeBinder of exactly the picked face +
+                              Pad), undoable as one step; picking one face
+                              of a multi-face compound keeps the hole (the
+                              old whole-object Part::Extrusion filled it);
+                              a second pull chains through the Body path;
+                              invalid inner-wire faces are rebuilt via
+                              FaceMakerBullseye; rollback removes the
+                              Body/binder wreckage
+  back faces          37-38   back_face_distances finds the blind pocket's
+                              back face; survives a CenterOfMass that sits
+                              inside the hole (probed pitfall)
+  push-through        39-41   interactive push clamps/snaps at the back face
+                              and commits Pocket Type=ThroughAll (probed:
+                              epsilon-short Length leaves a 1e-7 membrane);
+                              shallower pushes stay exact Length; typed
+                              depths bypass clamp and snap entirely
+  tracker helpers     42      ghost outlines/side-edge bases cover every
+                              wire of a holed face (prism ghost geometry)
+  Qt key routing      43-46   Ctrl/Alt chords neither swallowed nor typed,
                               Esc ends the waiting-for-a-face state, teardown
                               clears the module session slot
-  uppercut hook       36      mark_active/mark_inactive fire through a fake
+  uppercut hook       47      mark_active/mark_inactive fire through a fake
                               toolstate and no-op cleanly without Uppercut
-  command wiring      37      static xref: Activated aborts the previous
+  command wiring      48      static xref: Activated aborts the previous
                               session and consumes the selection, the arming
                               click does not zero-commit, toolstate hooks sit
                               on the start/teardown funnels
 """
+import math
 import os
 import sys
 import traceback
@@ -77,8 +96,13 @@ from freecad.PushPullWB import face_utils  # noqa: E402
 from freecad.PushPullWB import geom  # noqa: E402
 from freecad.PushPullWB.drag_controller import PushPullController  # noqa: E402
 
-EXPECTED_CHECKS = 37
+EXPECTED_CHECKS = 48
 V = App.Vector
+
+#: exact expected volumes for the seeded-Body checks (40x30 rectangle with
+#: a r=6 center hole, pulled 8 then a further 4)
+RING_VOL_8 = 40 * 30 * 8 - math.pi * 36 * 8
+RING_VOL_12 = 40 * 30 * 12 - math.pi * 36 * 12
 
 _checks = []
 
@@ -112,6 +136,52 @@ def face_by_normal(shape, direction, at_z=None):
                 continue
             return "Face%d" % (i + 1)
     raise AssertionError("no face with normal %s" % direction)
+
+
+def ring_and_disc():
+    """A 40x30 rectangle face with a r=6 center hole (the ring) plus the
+    separate disc that "cut" it -- the FreeCAD analog of a circle drawn on
+    a SketchUp rectangle. Returns (ring_face, disc_face)."""
+    outer = Part.Wire(Part.makePolygon(
+        [V(0, 0, 0), V(40, 0, 0), V(40, 30, 0), V(0, 30, 0), V(0, 0, 0)]))
+    inner = Part.Wire(Part.Edge(Part.Circle(V(20, 15, 0), V(0, 0, 1), 6)))
+    ring = Part.makeFace([outer, inner], "Part::FaceMakerBullseye")
+    return ring, Part.Face(inner)
+
+
+def make_plate_with_blind_pocket(doc):
+    """40x30x10 plate Body with a 4 mm deep r=5 blind circular pocket sunk
+    into the top face. Returns (body, pocket_feature, floor_face_name):
+    the pocket floor sits at z=6 with 6 mm of material left under it."""
+    body = doc.addObject("PartDesign::Body", "Plate")
+    sk = body.newObject("Sketcher::SketchObject", "PlateSketch")
+    for g in [Part.LineSegment(V(0, 0, 0), V(40, 0, 0)),
+              Part.LineSegment(V(40, 0, 0), V(40, 30, 0)),
+              Part.LineSegment(V(40, 30, 0), V(0, 30, 0)),
+              Part.LineSegment(V(0, 30, 0), V(0, 0, 0))]:
+        sk.addGeometry(g)
+    pad = body.newObject("PartDesign::Pad", "PlatePad")
+    pad.Profile = sk
+    pad.Length = 10
+    skc = body.newObject("Sketcher::SketchObject", "PocketSketch")
+    skc.Placement.Base = V(0, 0, 10)
+    skc.addGeometry(Part.Circle(V(20, 15, 0), V(0, 0, 1), 5))
+    poc = body.newObject("PartDesign::Pocket", "Blind")
+    poc.Profile = skc
+    poc.Length = 4
+    doc.recompute()
+    floor = None
+    for i, f in enumerate(poc.Shape.Faces):
+        if abs(f.CenterOfMass.z - 6) < 1e-6 and len(f.Wires) == 1:
+            floor = "Face%d" % (i + 1)
+    return body, poc, floor
+
+
+def profile_object(feature):
+    """The object a Pad's Profile links to (Profile reads back as either
+    the object or an (object, subs) tuple depending on how it was set)."""
+    prof = feature.Profile
+    return prof[0] if isinstance(prof, (tuple, list)) else prof
 
 
 class FakeGhost(object):
@@ -371,6 +441,26 @@ def _c(fx):
     ok(fx.body.Tip is fx.box, "undo restores the box tip")
 
 
+@check("controller: pushing the Reversed bottom face pockets UPWARD")
+def _c(fx):
+    # the other half of the face_normal orientation lock, with exact
+    # volume: pushing the bottom face 4 mm INTO the solid must eat the
+    # bottom 4 mm slab (ZMin rises to 4), not the top
+    bottom = face_by_normal(fx.box.Shape, V(0, 0, -1))
+    c = PushPullController(fx.doc)
+    ok(c.start(fx.box, bottom)[0], "start on the bottom face")
+    c.update_distance(-4.0)
+    pocket = c.commit()
+    ok(pocket is not None, "committed: %s" % c.last_message)
+    ok(pocket.TypeId == "PartDesign::Pocket", "inward drag is a Pocket")
+    approx(float(pocket.Length), 4.0, 1e-9, "positive length")
+    approx(pocket.Shape.Volume, 1000 - 100 * 4, 1e-6, "ate 400 mm3")
+    approx(pocket.Shape.BoundBox.ZMin, 4.0, 1e-6, "eaten from the bottom up")
+    fx.doc.undo()
+    fx.doc.recompute()
+    ok(fx.body.Tip is fx.box, "undo restores the box tip")
+
+
 # -- session leaks ---------------------------------------------------------
 
 @check("leak: re-starting a controller removes the leftover ghost")
@@ -522,44 +612,296 @@ def _c(fx):
     ok(fx.body.Tip is fx.pad, "undo restores the pad tip")
 
 
-# -- commit_extrude (standalone loose face) --------------------------------
+# -- commit_seed_body (standalone loose face) ------------------------------
 
-@check("extrude: loose face commits to a solid Part::Extrusion, undoable")
+@check("seed: loose face pull seeds a Body (hidden binder + Pad), undoable")
 def _c(fx):
     undo_before = fx.doc.UndoCount
+    n = len(fx.doc.Objects)
     c = PushPullController(fx.doc)
     ok(c.start(fx.loose, "Face1")[0], "start on the loose face")
     c.update_distance(4.0)
-    ext = c.commit()
-    ok(ext is not None, "committed: %s" % c.last_message)
-    ok(ext.TypeId == "Part::Extrusion", "parametric extrusion")
-    approx(ext.Shape.Volume, 10 * 10 * 4, 1e-6, "solid volume")
+    pad = c.commit()
+    ok(pad is not None, "committed: %s" % c.last_message)
+    ok(pad.TypeId == "PartDesign::Pad", "seeded Pad, not a bare extrusion")
+    approx(pad.Shape.Volume, 10 * 10 * 4, 1e-6, "solid volume")
+    binder = profile_object(pad)
+    ok(binder.TypeId == "PartDesign::SubShapeBinder", "profile is the binder")
+    ok(binder.Support[0][0] is fx.loose, "binder captures the picked source")
+    # InList lists the Body twice (Group link + Tip link) -- dedupe by name
+    bodies = {p.Name: p for p in pad.InList if p.TypeId == "PartDesign::Body"}
+    ok(len(bodies) == 1, "exactly one owning Body")
+    body = next(iter(bodies.values()))
+    ok(body.Tip is pad, "new Body with Tip on the Pad")
     ok(fx.doc.UndoCount == undo_before + 1, "one undo step")
-    ext_name = ext.Name  # the object dies with the undo
+    names = (pad.Name, binder.Name, body.Name)
     fx.doc.undo()
     fx.doc.recompute()
-    ok(fx.doc.getObject(ext_name) is None, "undo removes it")
+    for nm in names:
+        ok(fx.doc.getObject(nm) is None, "undo removes %s" % nm)
+    ok(len(fx.doc.Objects) == n, "object count restored")
 
 
-@check("extrude: negative distance goes the other way")
+@check("seed: negative distance extrudes the other way")
 def _c(fx):
-    ext = commit_mod.commit_extrude(fx.doc, fx.loose, V(0, 0, 1), -4.0)
-    zmin = ext.Shape.BoundBox.ZMin
-    approx(zmin, -4.0, 1e-6, "extruded downward")
-    fx.doc.removeObject(ext.Name)
+    pad = commit_mod.commit_seed_body(fx.doc, fx.loose, "Face1", V(0, 0, 1), -4.0)
+    approx(pad.Shape.BoundBox.ZMin, -4.0, 1e-6, "extruded downward")
+    approx(pad.Shape.Volume, 10 * 10 * 4, 1e-6, "same solid volume")
+    fx.doc.undo()
     fx.doc.recompute()
 
 
-@check("extrude: too-small distance refused, document untouched")
+@check("seed: too-small distance refused, document untouched")
 def _c(fx):
     n = len(fx.doc.Objects)
     try:
-        commit_mod.commit_extrude(fx.doc, fx.loose, V(0, 0, 1), 1e-9)
+        commit_mod.commit_seed_body(fx.doc, fx.loose, "Face1", V(0, 0, 1), 1e-9)
     except commit_mod.CommitError:
         pass
     else:
-        raise AssertionError("near-zero extrude accepted")
+        raise AssertionError("near-zero seed accepted")
     ok(len(fx.doc.Objects) == n, "no objects created")
+
+
+@check("seed: picking one face of a multi-face compound keeps the hole")
+def _c(fx):
+    # THE reported void bug: an object holding ring + disc, pick the ring.
+    # The old whole-object Part::Extrusion extruded BOTH faces (probed:
+    # volume 9600, two overlapping solids -- hole silently filled); the
+    # binder captures only the picked ring, so the hole survives exactly.
+    ring, disc = ring_and_disc()
+    two = fx.doc.addObject("Part::Feature", "RingAndDisc")
+    two.Shape = Part.Compound([ring, disc])
+    fx.doc.recompute()
+    c = PushPullController(fx.doc)
+    ok(c.start(two, "Face1")[0], "start on the ring face")
+    c.update_distance(8.0)
+    pad = c.commit()
+    ok(pad is not None, "committed: %s" % c.last_message)
+    ok(len(pad.Shape.Solids) == 1, "ONE solid, not two overlapping")
+    approx(pad.Shape.Volume, RING_VOL_8, 1e-6, "hole preserved exactly")
+    fx.ring_src = two
+    fx.seed_pad = pad
+
+
+@check("seed: a second pull on the seeded Body flows through the Body path")
+def _c(fx):
+    topn = None
+    for i, f in enumerate(fx.seed_pad.Shape.Faces):
+        if len(f.Wires) == 2 and abs(f.CenterOfMass.z - 8) < 1e-6:
+            topn = "Face%d" % (i + 1)
+    ok(topn is not None, "holed top face found on the seeded Pad")
+    pick = face_utils.validate_pick(fx.seed_pad, topn)
+    ok(not pick["standalone"], "no dead-end: the result is a normal Body")
+    c = PushPullController(fx.doc)
+    ok(c.start(fx.seed_pad, topn)[0], "start on the seeded Body's top")
+    c.update_distance(4.0)
+    pad2 = c.commit()
+    ok(pad2 is not None, "committed: %s" % c.last_message)
+    approx(pad2.Shape.Volume, RING_VOL_12, 1e-6, "chained pull keeps the hole")
+    seed_name = fx.seed_pad.Name
+    fx.doc.undo()  # the follow-up pull
+    fx.doc.recompute()
+    fx.doc.undo()  # the seed commit itself
+    fx.doc.recompute()
+    ok(fx.doc.getObject(seed_name) is None, "seed undone cleanly")
+    ok(fx.doc.getObject(fx.ring_src.Name) is not None, "source face object kept")
+    fx.doc.removeObject(fx.ring_src.Name)
+    fx.doc.recompute()
+
+
+@check("seed: invalid inner-wire face is rebuilt via FaceMakerBullseye")
+def _c(fx):
+    # Part.Face([outer, inner]) yields a geometrically INVALID face (bad
+    # inner-wire orientation -- routine in scripted/imported geometry).
+    # Probed: a binder happily copies it and the Pad then computes
+    # "Up-to-date" with the hole FILLED and an invalid shape, so the
+    # commit must rebuild the face first (hidden static fallback feature).
+    outer = Part.Wire(Part.makePolygon(
+        [V(0, 0, 0), V(40, 0, 0), V(40, 30, 0), V(0, 30, 0), V(0, 0, 0)]))
+    inner = Part.Wire(Part.Edge(Part.Circle(V(20, 15, 0), V(0, 0, 1), 6)))
+    bad = Part.Face([outer, inner])
+    ok(not bad.isValid(), "precondition: the source face really is invalid")
+    src = fx.doc.addObject("Part::Feature", "BadFace")
+    src.Shape = bad
+    fx.doc.recompute()
+    n = len(fx.doc.Objects)
+    before = set(o.Name for o in fx.doc.Objects)
+    c = PushPullController(fx.doc)
+    ok(c.start(src, "Face1")[0], "start on the invalid face")
+    c.update_distance(8.0)
+    pad = c.commit()
+    ok(pad is not None, "committed: %s" % c.last_message)
+    approx(pad.Shape.Volume, RING_VOL_8, 1e-6, "hole preserved via the rebuild")
+    support = profile_object(pad).Support[0][0]
+    ok(support is not src, "binder bound to the rebuilt fallback, not the invalid source")
+    ok(support.Shape.Faces[0].isValid(), "fallback face is valid")
+    added = [o for o in fx.doc.Objects if o.Name not in before]
+    fallbacks = [o for o in added if o.TypeId == "Part::Feature"]
+    ok(len(fallbacks) == 1 and fallbacks[0] is support,
+       "exactly one hidden fallback feature, and the binder points at it")
+    fx.doc.undo()
+    fx.doc.recompute()
+    ok(len(fx.doc.Objects) == n, "undo removes the fallback feature too")
+    fx.doc.removeObject(src.Name)
+    fx.doc.recompute()
+
+
+@check("seed: rollback removes the Body/binder wreckage")
+def _c(fx):
+    names = set(o.Name for o in fx.doc.Objects)
+    undo_before = fx.doc.UndoCount
+    try:
+        commit_mod.commit_seed_body(fx.doc, fx.loose, "Face999", V(0, 0, 1), 5.0)
+    except commit_mod.CommitError:
+        pass
+    else:
+        raise AssertionError("bogus face name committed")
+    ok(set(o.Name for o in fx.doc.Objects) == names, "no leftovers")
+    ok(fx.doc.UndoCount == undo_before, "no undo step left behind")
+    # the explicit wreckage-removal discipline itself (what a mid-build
+    # failure relies on, especially under UndoMode 0 where abortTransaction
+    # rolls back nothing -- probed), including the Body's auto-created
+    # Origin group, recorded exactly the way commit_seed_body records it:
+    doc0 = App.newDocument("PushPullSeedUndo0")
+    try:
+        ok(doc0.UndoMode == 0, "precondition: undo off")
+        doc0.openTransaction("wreck")
+        body = doc0.addObject("PartDesign::Body", "Wreck")
+        wreck = [body.Name]
+        origin = body.Origin
+        if origin is not None:
+            wreck.append(origin.Name)
+            wreck.extend(of.Name for of in getattr(origin, "OriginFeatures", []))
+        binder = body.newObject("PartDesign::SubShapeBinder", "WreckBinder")
+        pad = body.newObject("PartDesign::Pad", "WreckPad")
+        commit_mod._rollback_names(doc0, [pad.Name, binder.Name] + wreck)
+        ok(len(doc0.Objects) == 0,
+           "all wreckage removed, Origin group included (left: %r)"
+           % [o.Name for o in doc0.Objects])
+    finally:
+        App.closeDocument(doc0.Name)
+
+
+# -- back-face candidates and push-through ---------------------------------
+
+@check("face_utils: back_face_distances finds the blind pocket's back face")
+def _c(fx):
+    fx.plate_body, fx.plate_poc, fx.plate_floor = \
+        make_plate_with_blind_pocket(fx.doc)
+    ok(fx.plate_floor is not None, "pocket floor found")
+    pick = face_utils.validate_pick(fx.plate_poc, fx.plate_floor)
+    cands = face_utils.back_face_distances(
+        pick["face"], fx.plate_poc.Shape, pick["normal"])
+    ok(len(cands) == 1, "exactly one candidate, got %r" % (cands,))
+    approx(cands[0], 6.0, 1e-6, "remaining thickness under the floor")
+
+
+@check("face_utils: back_face_distances survives a hole-centered CenterOfMass")
+def _c(fx):
+    # probed pitfall: the holed top face's CenterOfMass sits INSIDE the
+    # hole, so a ray cast from it crosses nothing -- the function must
+    # sample a real on-face point (ParameterRange + isPartOfDomain)
+    box = fx.doc.addObject("Part::Box", "ComTrapBox")
+    box.Length, box.Width, box.Height = 40, 30, 10
+    cyl = fx.doc.addObject("Part::Cylinder", "ComTrapCyl")
+    cyl.Radius, cyl.Height = 6, 20
+    cyl.Placement.Base = V(20, 15, -5)
+    cut = fx.doc.addObject("Part::Cut", "ComTrap")
+    cut.Base, cut.Tool = box, cyl
+    fx.doc.recompute()
+    holed = None
+    for f in cut.Shape.Faces:
+        if len(f.Wires) == 2 and abs(f.CenterOfMass.z - 10) < 1e-6:
+            holed = f
+    ok(holed is not None, "holed top face found")
+    com = holed.CenterOfMass
+    line = Part.makeLine(V(com.x, com.y, 9.999), V(com.x, com.y, -1000))
+    ok(len(cut.Shape.section(line).Vertexes) == 0,
+       "precondition: a ray from CenterOfMass crosses nothing")
+    cands = face_utils.back_face_distances(
+        holed, cut.Shape, face_utils.face_normal(holed))
+    ok(len(cands) >= 1, "candidates found despite the CenterOfMass trap")
+    approx(cands[0], 10.0, 1e-6, "bottom face at depth 10")
+    for o in (cut, box, cyl):
+        fx.doc.removeObject(o.Name)
+    fx.doc.recompute()
+
+
+@check("controller: inward drag clamps at the back face, commits ThroughAll")
+def _c(fx):
+    c = PushPullController(fx.doc)
+    ok(c.start(fx.plate_poc, fx.plate_floor)[0], "start on the pocket floor")
+    c.update_distance(-5.9)
+    approx(c.distance, -6.0, 1e-9, "snapped onto the back face")
+    c.update_distance(-9.0)
+    approx(c.distance, -6.0, 1e-9, "clamped: cannot push past the back face")
+    pocket = c.commit()
+    ok(pocket is not None, "committed: %s" % c.last_message)
+    ok(pocket.TypeId == "PartDesign::Pocket", "a push is a Pocket")
+    ok(pocket.Type == "ThroughAll",
+       "committed through, not an epsilon-short Length (probed: that "
+       "leaves a 1e-7 membrane)")
+    approx(pocket.Shape.Volume, 40 * 30 * 10 - math.pi * 25 * 10, 1e-6,
+           "clean through hole")
+    ok(len(pocket.Shape.Faces) == 7,
+       "both caps open, no membrane (got %d faces)" % len(pocket.Shape.Faces))
+    fx.doc.undo()
+    fx.doc.recompute()
+    ok(fx.plate_body.Tip is fx.plate_poc, "undo restores the blind-pocket tip")
+
+
+@check("controller: a shallower push stays an exact-Length Pocket")
+def _c(fx):
+    c = PushPullController(fx.doc)
+    ok(c.start(fx.plate_poc, fx.plate_floor)[0], "start on the pocket floor")
+    c.update_distance(-3.0)
+    approx(c.distance, -3.0, 1e-9, "no snap this far from the back face")
+    pocket = c.commit()
+    ok(pocket is not None, "committed: %s" % c.last_message)
+    ok(pocket.Type == "Length", "plain blind pocket")
+    approx(float(pocket.Length), 3.0, 1e-9, "exact drag depth")
+    approx(pocket.Shape.Volume,
+           40 * 30 * 10 - math.pi * 25 * 4 - math.pi * 25 * 3, 1e-6,
+           "blind pocket volume")
+    fx.doc.undo()
+    fx.doc.recompute()
+
+
+@check("controller: a typed depth bypasses clamp and snap entirely")
+def _c(fx):
+    c = PushPullController(fx.doc)
+    ok(c.start(fx.plate_poc, fx.plate_floor)[0], "start on the pocket floor")
+    for ch in "-5.9":
+        c.type_char(ch)
+    pocket = c.key_return()
+    ok(pocket is not None, "committed: %s" % c.last_message)
+    ok(pocket.TypeId == "PartDesign::Pocket", "typed push is a Pocket")
+    ok(pocket.Type == "Length", "typed depth commits verbatim, never ThroughAll")
+    approx(float(pocket.Length), 5.9, 1e-9, "exactly 5.9, not snapped to 6")
+    approx(pocket.Shape.Volume,
+           40 * 30 * 10 - math.pi * 25 * 4 - math.pi * 25 * 5.9, 1e-6,
+           "0.1 mm of material deliberately left")
+    fx.doc.undo()
+    fx.doc.recompute()
+
+
+# -- tracker pure helpers (prism ghost geometry) ---------------------------
+
+@check("tracker: ghost outlines/side-edge bases cover every wire")
+def _c(fx):
+    from freecad.PushPullWB import tracker
+    ring, _disc = ring_and_disc()
+    outlines = tracker.ghost_outlines(ring)
+    ok(len(outlines) == 2, "one polyline per wire -- the hole outline shows")
+    for pts in outlines:
+        ok(len(pts) >= 8, "discretized polyline")
+        approx(V(*pts[0]).sub(V(*pts[-1])).Length, 0.0, 1e-9, "closed polyline")
+    bases = tracker.ghost_side_bases(ring)
+    ok(len(bases) == 12,
+       "4 rectangle corners + 8 sampled circle points, got %d" % len(bases))
+    plain = tracker.ghost_side_bases(Part.makePlane(10, 10))
+    ok(len(plain) == 4, "plain rectangle keeps its 4 corners")
 
 
 # -- Qt key routing (commands.py imports headless; no QApplication needed) --

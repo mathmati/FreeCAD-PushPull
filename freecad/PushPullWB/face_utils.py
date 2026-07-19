@@ -7,6 +7,8 @@ no Coin/pivy, no Gui.Selection reads (the caller passes in the object and
 sub-element name it already resolved from Gui.Selection/preselection). This
 keeps face_utils importable and testable under plain ``freecadcmd``.
 """
+import random
+
 import FreeCAD as App
 import Part
 
@@ -90,9 +92,9 @@ def validate_pick(obj, sub_name):
         parametric Pad/Pocket (``standalone`` False, ``body`` set);
       * a **standalone planar face** on any other object (a bare Part::Feature
         face, e.g. one drawn by the SketchLayer addon or Draft) -> committed
-        as a parametric ``Part::Extrusion`` into a solid (``standalone`` True,
-        ``body`` None). This is the SketchUp "draw a face, then push it up"
-        path (added v0.2.0).
+        by seeding a new PartDesign Body from exactly the picked face (see
+        commit.commit_seed_body; ``standalone`` True, ``body`` None). This is
+        the SketchUp "draw a face, then push it up" path.
 
     Raises FaceRejected with a user-facing message on any problem (non-face
     sub-element, non-planar face, nothing selected).
@@ -158,6 +160,67 @@ def validate_pick(obj, sub_name):
         "origin": origin,
         "normal": normal,
     }
+
+
+def back_face_distances(face, shape, normal, tol=1e-6):
+    """Sorted positive distances (mm) from ``face`` to the candidate "back
+    faces" of ``shape`` along the inward ``-normal`` axis -- the depths at
+    which an inward push breaks through to the opposite side (or into a
+    void). Pure geometry, no document access; returns [] when there is
+    nothing behind the face (open shell, standalone face).
+
+    Two probed pitfalls shape the implementation:
+      * the ray start must be a REAL on-face point: a holed face's
+        CenterOfMass can sit INSIDE the hole (probed: a section ray cast
+        from there crosses nothing), so a surface point is
+        rejection-sampled from ParameterRange with ``isPartOfDomain``;
+      * antiparallel planar faces are also collected by plane distance, so
+        a back face the single sampled ray happens to miss still registers.
+    """
+    rng = random.Random(0)  # deterministic sampling, headless-reproducible
+    umin, umax, vmin, vmax = face.ParameterRange
+    point = None
+    for _ in range(200):
+        u = rng.uniform(umin, umax)
+        v = rng.uniform(vmin, vmax)
+        if face.isPartOfDomain(u, v):
+            point = face.valueAt(u, v)
+            break
+    if point is None:
+        point = face.CenterOfMass
+
+    dists = []
+    for g in shape.Faces:
+        if not is_planar_face(g):
+            continue
+        try:
+            gn = face_normal(g)
+        except Exception:
+            continue
+        if gn.dot(normal) > -0.999:
+            continue
+        d = point.sub(g.CenterOfMass).dot(normal)
+        if d > tol:
+            dists.append(d)
+
+    # line section from just under the sampled point: void-aware crossings,
+    # including curved back faces the plane filter cannot see
+    try:
+        length = shape.BoundBox.DiagonalLength + 1.0
+        line = Part.makeLine(point.sub(normal * 0.001), point.sub(normal * length))
+        for vx in shape.section(line).Vertexes:
+            d = point.sub(vx.Point).dot(normal)
+            if d > tol:
+                dists.append(d)
+    except Exception:
+        pass
+
+    dists.sort()
+    merged = []
+    for d in dists:
+        if not merged or d - merged[-1] > 1e-6:
+            merged.append(d)
+    return merged
 
 
 def face_still_matches(feature, face_name, expected_area, expected_com, tol=1e-4):

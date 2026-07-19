@@ -41,6 +41,13 @@ class PushPullController:
     #: and the click-then-type gesture both work.
     DRAG_PIXEL_THRESHOLD = 4
 
+    #: an interactive inward drag within this many mm of the nearest
+    #: back-face candidate snaps onto it (and can never pass it) --
+    #: SketchUp's "offset is limited" stop at the opposite face. Landing an
+    #: interactive push epsilon-short of the back face would otherwise
+    #: leave a ~1e-7 membrane (probed). Typed distances bypass this.
+    BACK_SNAP_MM = 0.5
+
     def __init__(self, doc, view=None):
         self.doc = doc
         self.view = view
@@ -64,6 +71,7 @@ class PushPullController:
         self.normal = None
         self._expected_area = None
         self._expected_com = None
+        self._back_candidates = []
         self.distance = 0.0
         self.typed_buffer = ""
         self.committed_object = None
@@ -95,6 +103,15 @@ class PushPullController:
         self.normal = pick["normal"]
         self._expected_area = pick["face"].Area
         self._expected_com = pick["face"].CenterOfMass
+        # back-face candidate depths for the push-through clamp, computed
+        # once here at drag start (one cheap OCCT section, never per tick)
+        self._back_candidates = []
+        if not self.standalone:
+            try:
+                self._back_candidates = face_utils.back_face_distances(
+                    pick["face"], self.feature.Shape, self.normal)
+            except Exception:
+                self._back_candidates = []
         self.active = True
         self.distance = 0.0
         self.typed_buffer = ""
@@ -113,7 +130,16 @@ class PushPullController:
         status-bar text -- no OCCT call."""
         if not self.active:
             return self.distance
-        self.distance = float(distance)
+        distance = float(distance)
+        # SketchUp's "offset is limited": an interactive inward drag stops
+        # at the nearest back-face candidate, snapping onto it from
+        # BACK_SNAP_MM away so the commit lands exactly through. Typed
+        # distances are exact and skip this entirely (typed_buffer set).
+        if distance < 0 and not self.typed_buffer and self._back_candidates:
+            limit = self._back_candidates[0]
+            if -distance >= limit - self.BACK_SNAP_MM:
+                distance = -limit
+        self.distance = distance
         if self.ghost is not None:
             self.ghost.set_offset(self.normal * self.distance)
         self._update_readout()
@@ -182,9 +208,11 @@ class PushPullController:
             return None
 
         distance = self.distance
+        typed = False
         if self.typed_buffer not in ("", "-", ".", "-."):
             try:
                 distance = float(self.typed_buffer)
+                typed = True
             except ValueError:
                 pass
 
@@ -199,13 +227,28 @@ class PushPullController:
             self._teardown()
             return None
 
+        # An interactive push that stopped exactly at the LAST back-face
+        # candidate (nothing left behind it) is a break-through: commit it
+        # as Pocket Type='ThroughAll', never an epsilon-short Length (which
+        # leaves a ~1e-7 membrane, probed). A clamped stop at a nearer
+        # candidate with material beyond it stays an exact numeric Length.
+        through = (
+            not self.standalone
+            and not typed
+            and distance < 0
+            and bool(self._back_candidates)
+            and -distance >= self._back_candidates[0] - 1e-6
+            and self._back_candidates[-1] - self._back_candidates[0] <= 1e-6
+        )
+
         try:
             if self.standalone:
-                new_obj = commit_mod.commit_extrude(
-                    self.doc, self.feature, self.normal, distance)
+                new_obj = commit_mod.commit_seed_body(
+                    self.doc, self.feature, self.face_name, self.normal, distance)
             else:
                 new_obj = commit_mod.commit_pushpull(
-                    self.doc, self.body, self.feature, self.face_name, distance)
+                    self.doc, self.body, self.feature, self.face_name, distance,
+                    through=through)
         except commit_mod.CommitError as exc:
             self.last_message = str(exc)
             self._teardown()
@@ -241,7 +284,15 @@ class PushPullController:
             else:
                 kind = "Pad" if self.distance >= 0 else "Pocket"
             typed = f" [typed: {self.typed_buffer}]" if self.typed_buffer else ""
-            msg = f"PushPull: {kind} {abs(self.distance):.3g} mm{typed}  (Enter=commit, Esc=cancel)"
+            limited = ""
+            if (self.distance < 0 and not self.typed_buffer
+                    and self._back_candidates
+                    and -self.distance >= self._back_candidates[0] - 1e-6):
+                is_through = (self._back_candidates[-1]
+                              - self._back_candidates[0] <= 1e-6)
+                limited = (" (offset limited: through)" if is_through
+                           else " (offset limited)")
+            msg = f"PushPull: {kind} {abs(self.distance):.3g} mm{typed}{limited}  (Enter=commit, Esc=cancel)"
             Gui.getMainWindow().statusBar().showMessage(msg)
         except Exception:
             pass
