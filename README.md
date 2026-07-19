@@ -134,8 +134,12 @@ two ways:
    `key_return`) -> asserts a real parametric `PartDesign::Pad` exists
    with the exact typed length and `Body.Tip` advanced to it; a second
    pass simulates a negative drag distance -> asserts a
-   `PartDesign::Pocket`. Also covers the guards above and a cancel path
-   that leaves the document untouched. 21/21 checks pass.
+   `PartDesign::Pocket`. Also covers the guards above, a cancel path
+   that leaves the document untouched, single-undo-step commits with
+   rollback of failed ones (including `Body.Tip` restoration), the
+   stale-selection refusal, Reversed-face normals, ghost-tracker
+   lifecycle and the single-session/key-filter teardown rules.
+   37/37 checks pass.
 2. **GUI, under Xvfb** -- `verify/drivers/pushpull_drag_driver.py` and
    `pushpull_commit_driver.py` invoke the *real* `PushPullCommand` class
    (`Activated()`, exactly what a toolbar click runs) against a real 3D

@@ -25,12 +25,17 @@ def is_planar_face(face):
 
 
 def face_normal(face):
-    """Outward unit normal of a planar face, correcting for the face's own
-    Orientation flag (a well-known FreeCAD gotcha: a Face's geometric
-    ``normalAt`` can point *into* the solid if Orientation == 'Reversed')."""
+    """Outward unit normal of a planar face.
+
+    ``Part.Face.normalAt`` already applies the face's Orientation flag
+    (probed on FreeCAD 1.1: a box's bottom face has Orientation
+    'Reversed' and normalAt(0, 0) returns the correct outward (0, 0, -1)).
+    The old extra multiply(-1) on 'Reversed' therefore double-flipped:
+    every Reversed face got an INWARD drag axis, inverting the drag
+    direction and the Pad/Pocket sign on those faces. The
+    orientation-unaware gotcha applies to ``Surface.normal``, not to
+    ``Face.normalAt``."""
     normal = face.normalAt(0, 0)
-    if face.Orientation == "Reversed":
-        normal = normal.multiply(-1)
     normal.normalize()
     return normal
 
@@ -113,6 +118,30 @@ def validate_pick(obj, sub_name):
     sub = feature.getSubObject(sub_name)
     if sub is None or not isinstance(sub, Part.Face):
         raise FaceRejected("PushPull: could not resolve that face.")
+
+    if not standalone and obj is not feature and obj is not body:
+        # ``obj`` is an OLDER feature of the Body (a stale Gui.Selection
+        # held from before a commit moved the tip). ``sub_name`` was
+        # recorded against the old shape, and face indices do not carry
+        # over a tip change (probed headless: after one Pad, "Face6" of
+        # the old Box names a different side face on the new tip). Only
+        # accept the pick if the same-named face on the clicked object is
+        # geometrically the same face on the current tip.
+        try:
+            old = obj.getSubObject(sub_name)
+        except Exception:
+            old = None
+        same = (
+            old is not None
+            and isinstance(old, Part.Face)
+            and abs(old.Area - sub.Area) <= max(1e-4, sub.Area * 1e-6)
+            and old.CenterOfMass.sub(sub.CenterOfMass).Length <= 1e-3
+        )
+        if not same:
+            raise FaceRejected(
+                "PushPull: that selection is stale (the model changed since "
+                "the face was selected) -- click the face again."
+            )
 
     if not is_planar_face(sub):
         raise FaceRejected("PushPull only supports planar faces (this one is curved).")

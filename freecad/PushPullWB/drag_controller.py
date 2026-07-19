@@ -47,6 +47,14 @@ class PushPullController:
         self.reset()
 
     def reset(self):
+        # A ghost from an interrupted session must leave the scene graph
+        # before its reference is dropped, or it stays visible forever.
+        ghost = getattr(self, "ghost", None)
+        if ghost is not None:
+            try:
+                ghost.remove()
+            except Exception:
+                pass
         self.active = False
         self.body = None
         self.feature = None

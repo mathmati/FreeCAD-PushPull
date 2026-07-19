@@ -31,6 +31,7 @@ import FreeCAD as App
 import FreeCADGui as Gui
 from PySide import QtCore, QtGui, QtWidgets
 
+from .commit import MIN_LENGTH
 from .drag_controller import PushPullController
 
 _ICON_DIR = os.path.join(
@@ -46,6 +47,49 @@ _TYPE_KEYS = {
     QtCore.Qt.Key_6: "6", QtCore.Qt.Key_7: "7", QtCore.Qt.Key_8: "8",
     QtCore.Qt.Key_9: "9", QtCore.Qt.Key_Period: ".", QtCore.Qt.Key_Minus: "-",
 }
+
+
+def _typing_modifiers_ok(event):
+    """True when the key event carries no modifiers beyond Shift/Keypad.
+
+    Numpad digits arrive with KeypadModifier and Shift is harmless, but a
+    Ctrl/Alt/Meta chord (Ctrl+Z undo, Ctrl+S save, ...) is an application
+    shortcut, never distance typing -- it must neither be swallowed nor
+    fed into the typed buffer (same guard as the SketchLayer sibling).
+    """
+    other = event.modifiers() & ~(
+        QtCore.Qt.ShiftModifier | QtCore.Qt.KeypadModifier)
+    return not other
+
+
+#: The one live PushPull session (the command object doubles as the
+#: session). Re-activating the command -- toolbar click, Uppercut's "P"
+#: shortcut -- while a previous session is still wired up must abort that
+#: session first: without this, a second Activated stacked a second
+#: SoEvent callback and a second application-level key filter on top of
+#: the first, every event was handled twice (typed "5" became "55", the
+#: arming click was instantly re-read as a commit click), and _teardown
+#: only ever removed the newest pair, leaking the old ones for the rest
+#: of the FreeCAD run. Same fix as SketchLayer's _current_session.
+_current_session = None
+
+
+def _tool_started(command_name):
+    """Best-effort Uppercut active-tool highlight (pressed button look).
+    A no-op when Uppercut is not installed or its toolstate misbehaves."""
+    try:
+        from freecad.UppercutWB import toolstate
+        toolstate.mark_active(command_name)
+    except Exception:
+        pass
+
+
+def _tool_finished(command_name):
+    try:
+        from freecad.UppercutWB import toolstate
+        toolstate.mark_inactive(command_name)
+    except Exception:
+        pass
 
 
 class PushPullCommand(object):
@@ -74,6 +118,9 @@ class PushPullCommand(object):
         return App.ActiveDocument is not None and Gui.ActiveDocument is not None
 
     def Activated(self):
+        global _current_session
+        if _current_session is not None:
+            _current_session.abort()
         doc = App.ActiveDocument
         self._view = Gui.ActiveDocument.ActiveView
         self.controller = PushPullController(doc, view=self._view)
@@ -82,6 +129,8 @@ class PushPullCommand(object):
 
         self._sg_callback = self._view.addEventCallback("SoEvent", self._on_event)
         self._install_key_filter()
+        _current_session = self
+        _tool_started("PushPull_PushPull")
 
         # Convenience entry point: if the user already selected a face the
         # normal FreeCAD way before invoking this command, start right away.
@@ -93,10 +142,30 @@ class PushPullCommand(object):
         sel = Gui.Selection.getSelectionEx()
         if len(sel) == 1 and len(sel[0].SubElementNames) == 1:
             ok, msg = self.controller.start(sel[0].Object, sel[0].SubElementNames[0])
-            if not ok:
+            if ok:
+                # consume the selection: a commit does not clear it, so a
+                # later re-activation would otherwise auto-start from the
+                # same (by then stale) face reference again.
+                try:
+                    Gui.Selection.clearSelection()
+                except Exception:
+                    pass
+            else:
                 self._status(msg)
         else:
             self._status("PushPull: click a planar face to start (Esc cancels).")
+
+    def abort(self):
+        """End a still-wired session because the command is re-activating
+        (or another controller takes over): cancel the drag (document
+        untouched, ghost removed) and unhook the view callback and key
+        filter so nothing orphaned keeps eating events."""
+        try:
+            if self.controller is not None and self.controller.active:
+                self.controller.cancel()
+        except Exception:
+            pass
+        self._teardown()
 
     # -- Qt keyboard handling ------------------------------------------------
     def _install_key_filter(self):
@@ -138,26 +207,41 @@ class PushPullCommand(object):
         driver: a bare KeyPress handler alone silently lost every digit
         typed during a drag session to the view-switch shortcut instead).
         """
+        key = event.key()
+        if key == QtCore.Qt.Key_Escape and self._session_live():
+            # Esc must end the session even while still waiting for the
+            # arming face click (controller not active yet).
+            return True
         if self.controller is None or not self.controller.active:
             return False
-        key = event.key()
-        return key in _TYPE_KEYS or key in (
-            QtCore.Qt.Key_Escape,
+        if key in _TYPE_KEYS:
+            return _typing_modifiers_ok(event)
+        return key in (
             QtCore.Qt.Key_Return,
             QtCore.Qt.Key_Enter,
             QtCore.Qt.Key_Backspace,
         )
 
+    def _session_live(self):
+        """True while this command's callbacks/filter are wired up (from
+        Activated until _teardown), whether or not a drag is armed yet."""
+        return self._sg_callback is not None or (
+            self.controller is not None and self.controller.active)
+
     def handle_key(self, event):
         """Called by _KeyFilter for every QEvent.KeyPress while this
         command is active. Returns True if the event was consumed."""
-        if self.controller is None or not self.controller.active:
-            return False
         key = event.key()
-        if key == QtCore.Qt.Key_Escape:
-            self.controller.cancel()
+        if key == QtCore.Qt.Key_Escape and self._session_live():
+            # also covers the waiting-for-a-face state, where the old
+            # active-only check left the session unclosable from the
+            # keyboard unless the 3D view had focus
+            if self.controller is not None:
+                self.controller.cancel()
             self._teardown()
             return True
+        if self.controller is None or not self.controller.active:
+            return False
         if key in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
             self.controller.key_return()
             self._teardown()
@@ -165,7 +249,7 @@ class PushPullCommand(object):
         if key == QtCore.Qt.Key_Backspace:
             self.controller.key_backspace()
             return True
-        if key in _TYPE_KEYS:
+        if key in _TYPE_KEYS and _typing_modifiers_ok(event):
             self.controller.type_char(_TYPE_KEYS[key])
             return True
         return False
@@ -205,6 +289,15 @@ class PushPullCommand(object):
         state = arg.get("State")
         if state == "DOWN":
             if self.controller.active:
+                if (not self.controller.typed_buffer
+                        and abs(self.controller.distance) < MIN_LENGTH):
+                    # Armed but not dragged yet (typically the auto-start
+                    # from a prior selection): this press begins the drag.
+                    # Committing here would end the session immediately
+                    # with "distance too small".
+                    self._down_pos = arg.get("Position")
+                    self._moved_since_arm = False
+                    return
                 # second click while armed -> commit at current distance
                 self.controller.commit()
                 self._teardown()
@@ -262,15 +355,19 @@ class PushPullCommand(object):
             pass
 
     def _teardown(self):
+        global _current_session
         if self._view is not None and self._sg_callback is not None:
             try:
                 self._view.removeEventCallback("SoEvent", self._sg_callback)
             except Exception:
                 pass
-            self._sg_callback = None
+        self._sg_callback = None
         self._remove_key_filter()
         self._down_pos = None
         self._moved_since_arm = False
+        _tool_finished("PushPull_PushPull")
+        if _current_session is self:
+            _current_session = None
 
 
 class _KeyFilter(QtCore.QObject):

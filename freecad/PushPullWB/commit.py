@@ -19,17 +19,45 @@ class CommitError(Exception):
     """Friendly, user-facing message for why a commit couldn't happen."""
 
 
+def _rollback(doc, new_name, body=None, prev_tip=None):
+    """Undo a failed commit attempt. abortTransaction alone is enough in
+    the GUI (UndoMode 1), but with UndoMode 0 (headless freecadcmd, probed)
+    it rolls back nothing, so the half-built feature is also removed
+    explicitly and -- crucially -- Body.Tip is restored: doc.removeObject
+    of a Body's tip feature leaves Tip None (probed), which would make
+    every later PushPull on that Body fail with "no tip feature yet"."""
+    doc.abortTransaction()
+    try:
+        if new_name and doc.getObject(new_name) is not None:
+            doc.removeObject(new_name)
+    except Exception:
+        pass
+    try:
+        if body is not None and body.Tip is None and prev_tip is not None \
+                and doc.getObject(prev_tip.Name) is not None:
+            body.Tip = prev_tip
+    except Exception:
+        pass
+    try:
+        doc.recompute()
+    except Exception:
+        pass
+
+
 def commit_pushpull(doc, body, feature, face_name, distance, name_hint="PushPull"):
     """Create a PartDesign::Pad (distance > 0, dragged away from the solid
     along the face's outward normal) or PartDesign::Pocket (distance < 0,
     dragged into the solid), using ``face_name`` on ``feature`` directly as
     the Profile. Returns the new feature object. Recomputes the document.
 
+    The whole build runs inside one document transaction, so a committed
+    PushPull is a single Undo step in the GUI and a failed one is rolled
+    back (plus the explicit cleanup in :func:`_rollback` for UndoMode 0).
+
     Raises CommitError for a too-small distance (nothing meaningful to
     commit) or if the resulting feature fails to compute validly (e.g. the
     dragged distance would self-intersect the existing solid) -- in which
-    case the half-built feature is removed again so the document is left
-    exactly as it was before the attempt.
+    case the document is left exactly as it was before the attempt.
     """
     if abs(distance) < MIN_LENGTH:
         raise CommitError("PushPull: drag distance too small, nothing to commit.")
@@ -41,14 +69,17 @@ def commit_pushpull(doc, body, feature, face_name, distance, name_hint="PushPull
         feature_type = "PartDesign::Pocket"
         length = -distance
 
-    new_obj = body.newObject(feature_type, name_hint)
-    new_obj.Profile = (feature, [face_name])
-    new_obj.Length = length
+    prev_tip = body.Tip
+    new_name = None
+    doc.openTransaction("PushPull")
     try:
+        new_obj = body.newObject(feature_type, name_hint)
+        new_name = new_obj.Name
+        new_obj.Profile = (feature, [face_name])
+        new_obj.Length = length
         doc.recompute()
     except Exception as exc:
-        doc.removeObject(new_obj.Name)
-        doc.recompute()
+        _rollback(doc, new_name, body, prev_tip)
         raise CommitError(f"PushPull: recompute failed ({exc}); commit aborted.")
 
     state = list(getattr(new_obj, "State", []))
@@ -59,13 +90,13 @@ def commit_pushpull(doc, body, feature, face_name, distance, name_hint="PushPull
         shape_ok = False
 
     if "Invalid" in state or not shape_ok:
-        doc.removeObject(new_obj.Name)
-        doc.recompute()
+        _rollback(doc, new_name, body, prev_tip)
         raise CommitError(
             "PushPull: that distance produces an invalid solid (likely "
             "self-intersection); try a smaller distance."
         )
 
+    doc.commitTransaction()
     return new_obj
 
 
@@ -84,19 +115,21 @@ def commit_extrude(doc, feature, normal, distance, name_hint="PushPull"):
     if abs(distance) < MIN_LENGTH:
         raise CommitError("PushPull: drag distance too small, nothing to commit.")
 
-    ext = doc.addObject("Part::Extrusion", name_hint)
-    ext.Base = feature
-    ext.DirMode = "Custom"
-    ext.Dir = App.Vector(normal)
-    ext.LengthFwd = abs(distance)
-    ext.Reversed = distance < 0
-    ext.Solid = True
-    ext.Symmetric = False
+    ext_name = None
+    doc.openTransaction("PushPull")
     try:
+        ext = doc.addObject("Part::Extrusion", name_hint)
+        ext_name = ext.Name
+        ext.Base = feature
+        ext.DirMode = "Custom"
+        ext.Dir = App.Vector(normal)
+        ext.LengthFwd = abs(distance)
+        ext.Reversed = distance < 0
+        ext.Solid = True
+        ext.Symmetric = False
         doc.recompute()
     except Exception as exc:
-        doc.removeObject(ext.Name)
-        doc.recompute()
+        _rollback(doc, ext_name)
         raise CommitError(f"PushPull: recompute failed ({exc}); commit aborted.")
 
     shape_ok = True
@@ -105,10 +138,10 @@ def commit_extrude(doc, feature, normal, distance, name_hint="PushPull"):
     except Exception:
         shape_ok = False
     if "Invalid" in list(getattr(ext, "State", [])) or not shape_ok:
-        doc.removeObject(ext.Name)
-        doc.recompute()
+        _rollback(doc, ext_name)
         raise CommitError(
             "PushPull: could not extrude that face into a valid solid; "
             "check the face is planar and the distance is non-zero."
         )
+    doc.commitTransaction()
     return ext
