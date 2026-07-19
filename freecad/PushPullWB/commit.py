@@ -62,6 +62,19 @@ def _rollback_names(doc, names):
         pass
 
 
+def _restore_tip(doc, body, prev_tip):
+    """Re-point Body.Tip after a rollback removed the half-built feature:
+    doc.removeObject of a Body's tip leaves Tip None (probed), which would
+    make every later PushPull on that Body fail with "no tip feature yet"."""
+    try:
+        if body is not None and body.Tip is None and prev_tip is not None \
+                and doc.getObject(prev_tip.Name) is not None:
+            body.Tip = prev_tip
+            doc.recompute()
+    except Exception:
+        pass
+
+
 def _hide(obj):
     """Hide a helper object in the 3D view/tree (ViewObject is None under
     freecadcmd -- guard it)."""
@@ -135,6 +148,85 @@ def commit_pushpull(doc, body, feature, face_name, distance, name_hint="PushPull
         )
 
     doc.commitTransaction()
+    return new_obj
+
+
+def commit_region(doc, body, region_face, distance, splitters=(),
+                  name_hint="PushPull", through=False):
+    """Commit a push/pull of a REGION of a Body face -- the piece of the
+    face inside (or outside) a coplanar drawn shape, resolved by
+    ``face_utils.resolve_region`` -- as a Pad (distance > 0) or Pocket
+    (distance < 0) in the SAME Body that owns the picked face. Returns the
+    new feature. Recomputes the document.
+
+    Mechanism (probed on FreeCAD 1.1): the region face goes into a hidden
+    static ``Part::Feature`` (same fallback shape-holder the seed path
+    uses), a hidden ``SubShapeBinder`` in the Body captures it, and the
+    Pad/Pocket takes the binder as Profile. common()/cut() keep the picked
+    face's Orientation, and a Pad on a binder extrudes along the profile
+    face's ORIENTED normal (probed: a bottom-face region pads downward =
+    outward), so the sign logic is identical to the whole-face path -- no
+    Reversed flag needed. ``through=True`` commits the Pocket as
+    Type='ThroughAll' (same membrane rationale as :func:`commit_pushpull`).
+
+    ``splitters`` are the drawn objects that bounded the region; after a
+    SUCCESSFUL commit their ViewObjects are hidden (the drawn shape has
+    served as a split line -- leaving it visible re-creates the two-
+    coplanar-surfaces confusion this feature exists to remove). A failed,
+    rolled-back commit never touches them.
+    """
+    if abs(distance) < MIN_LENGTH:
+        raise CommitError("PushPull: drag distance too small, nothing to commit.")
+
+    if distance > 0:
+        feature_type = "PartDesign::Pad"
+        length = distance
+    else:
+        feature_type = "PartDesign::Pocket"
+        length = -distance
+
+    prev_tip = body.Tip
+    created = []  # newest first, the removal order for _rollback_names
+    doc.openTransaction("PushPull")
+    try:
+        helper = doc.addObject("Part::Feature", name_hint + "Region")
+        created.insert(0, helper.Name)
+        helper.Shape = region_face
+        _hide(helper)
+        binder = body.newObject("PartDesign::SubShapeBinder", name_hint + "Binder")
+        created.insert(0, binder.Name)
+        binder.Support = [(helper, ("Face1",))]
+        _hide(binder)
+        new_obj = body.newObject(feature_type, name_hint)
+        created.insert(0, new_obj.Name)
+        new_obj.Profile = binder
+        if through and distance < 0:
+            new_obj.Type = "ThroughAll"
+        else:
+            new_obj.Length = length
+        doc.recompute()
+    except Exception as exc:
+        _rollback_names(doc, created)
+        _restore_tip(doc, body, prev_tip)
+        raise CommitError(f"PushPull: recompute failed ({exc}); commit aborted.")
+
+    state = list(getattr(new_obj, "State", []))
+    shape_ok = True
+    try:
+        shape_ok = new_obj.Shape.isValid() and not new_obj.Shape.isNull()
+    except Exception:
+        shape_ok = False
+    if "Invalid" in state or not shape_ok:
+        _rollback_names(doc, created)
+        _restore_tip(doc, body, prev_tip)
+        raise CommitError(
+            "PushPull: that distance produces an invalid solid (likely "
+            "self-intersection); try a smaller distance."
+        )
+
+    doc.commitTransaction()
+    for s in splitters:
+        _hide(s)
     return new_obj
 
 

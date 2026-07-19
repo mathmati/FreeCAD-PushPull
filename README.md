@@ -101,6 +101,34 @@ remains open.
    event callbacks/filters are torn down, and the document is left
    completely unchanged.
 
+### Drawing on a face splits it for push/pull
+
+In SketchUp, drawing a closed loop on an existing face splits the face:
+the inside and the remaining outside become separately pullable. FreeCAD
+has no such implicit splitting -- a drawn shape is just a second coplanar
+surface lying on the solid's face. PushPull bridges that at pick time:
+when you click a face of a Body and one or more drawn coplanar closed
+shapes (loose faces or closed wires -- SketchLayer or Draft output) lie
+on it, the 3D point you clicked resolves to a *region* of the face:
+
+- inside a drawn shape -> that piece of the face (the shape clipped to
+  the face, so a shape hanging over the edge still works);
+- outside every drawn shape -> the remaining outer region (holes and all).
+
+The drag then ghosts, clamps and commits that region only: outward is a
+`PartDesign::Pad`, inward a `PartDesign::Pocket`, in the *same* Body that
+owns the face -- pushing an inner region all the way through a plate
+opens a shaped hole, exactly like a whole-face push. Under the hood the
+region face is stored in a hidden static helper feature, captured by a
+hidden `SubShapeBinder`, and used as the Pad/Pocket profile. After a
+successful region commit the drawn shape is hidden -- it has served as a
+split line (a cancelled or failed commit leaves it untouched). With no
+drawn shape on the face, or when the click cannot be confidently resolved
+to a region, the behavior is the whole face, exactly as before. Note the
+region profile is a static snapshot: it does not follow later edits of
+the drawn shape (the drawn shape itself remains in the document, hidden,
+and can be shown again from the tree).
+
 ### Guards (friendly messages, not crashes)
 
 - Non-planar face picked -> "PushPull only supports planar faces (this
@@ -159,8 +187,11 @@ two ways:
    directions, the seeded-Body loose-face path (holes preserved to exact
    volumes, chained follow-up pulls, the invalid-face rebuild, wreckage
    rollback), back-face detection and the push-through clamp/ThroughAll
-   commit, the ghost outline/side-edge helpers, ghost-tracker lifecycle
-   and the single-session/key-filter teardown rules. 48/48 checks pass.
+   commit, region picking (inner/outer/edge-clipped/wire splitters,
+   exact area-times-distance volumes, region push-through, splitter
+   hiding and rollback discipline), the ghost outline/side-edge helpers,
+   ghost-tracker lifecycle and the single-session/key-filter teardown
+   rules. 58/58 checks pass.
 2. **GUI, under Xvfb** -- `verify/drivers/pushpull_drag_driver.py` and
    `pushpull_commit_driver.py` invoke the *real* `PushPullCommand` class
    (`Activated()`, exactly what a toolbar click runs) against a real 3D
@@ -218,11 +249,14 @@ beyond what FreeCAD itself ships (`pivy`, `PySide`).
   is declined with a friendly message). Since a loose-face pull now
   produces a Body rather than a bare `Part::Extrusion`, the addon's own
   output no longer runs into this limit.
-- No rectangle-on-face-to-new-sketch mode (SketchUp's "draw a shape on a
-  face" gesture) itself -- but you can now *draw* the face to push/pull
-  with FreeCAD's Draft workbench (whose snapping is itself SketchUp-
-  inspired) or the companion **SketchLayer** addon, then Push/Pull the
-  resulting loose face into a solid.
+- Drawing itself stays in Draft or the companion **SketchLayer** addon;
+  PushPull only consumes the result. A drawn closed shape on a Body face
+  splits it at pick time (see above), but the region profile committed is
+  a static snapshot -- editing the drawn shape afterward does not update
+  an already-committed region Pad/Pocket.
+- Clicking the drawn *loose face itself* (rather than the Body face under
+  it) still takes the seed-a-Body path -- to modify the existing solid,
+  click the solid's face.
 - Only one face can be dragged per command activation; re-activate (or
   re-invoke) to push/pull another face.
 - Not internationalized (UI strings are plain Python, not

@@ -141,7 +141,18 @@ class PushPullCommand(object):
         # sub-element string, which is not what we want here.
         sel = Gui.Selection.getSelectionEx()
         if len(sel) == 1 and len(sel[0].SubElementNames) == 1:
-            ok, msg = self.controller.start(sel[0].Object, sel[0].SubElementNames[0])
+            # PickedPoints carries the 3D point of the selecting click --
+            # it resolves which REGION of the face was clicked when drawn
+            # shapes lie on it (guarded: not every selection has one)
+            point = None
+            try:
+                pts = sel[0].PickedPoints
+                if pts:
+                    point = pts[0]
+            except Exception:
+                point = None
+            ok, msg = self.controller.start(
+                sel[0].Object, sel[0].SubElementNames[0], pick_point=point)
             if ok:
                 # consume the selection: a commit does not clear it, so a
                 # later re-activation would otherwise auto-start from the
@@ -306,7 +317,8 @@ class PushPullCommand(object):
             if obj is None:
                 self._status("PushPull: click a planar face to start (Esc cancels).")
                 return
-            ok, msg = self.controller.start(obj, sub)
+            point = self._pick_point_3d(arg.get("Position"))
+            ok, msg = self.controller.start(obj, sub, pick_point=point)
             self._status(msg)
             if ok:
                 self._down_pos = arg.get("Position")
@@ -327,6 +339,21 @@ class PushPullCommand(object):
         sub = presel.SubElementNames[0]
         obj = App.ActiveDocument.getObject(presel.Object.Name)
         return obj, sub
+
+    def _pick_point_3d(self, pos):
+        """The 3D point under a 2D screen position, from the view's own
+        geometry pick (``getObjectInfo``, the documented idiom Draft's
+        snapper uses). None when nothing pickable is under the cursor --
+        the drag then simply targets the whole face."""
+        if pos is None:
+            return None
+        try:
+            info = self._view.getObjectInfo((pos[0], pos[1]))
+            if info:
+                return App.Vector(info["x"], info["y"], info["z"])
+        except Exception:
+            pass
+        return None
 
     def _pick_ray(self, pos):
         """Unproject a 2D screen position to a 3D pick ray (origin,

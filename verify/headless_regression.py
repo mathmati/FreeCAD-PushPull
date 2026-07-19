@@ -5,7 +5,7 @@ Run from the repo root:
 
     freecadcmd verify/headless_regression.py
 
-Exit code 0 and a final "48/48 checks pass" line when green.
+Exit code 0 and a final "58/58 checks pass" line when green.
 
 Drives the Gui-decoupled ``PushPullController`` by method call -- the same
 object the real SoEvent/Qt callbacks drive: "the user dragged 5 mm" is
@@ -54,17 +54,32 @@ Checks (one shared document; order matters):
                               epsilon-short Length leaves a 1e-7 membrane);
                               shallower pushes stay exact Length; typed
                               depths bypass clamp and snap entirely
-  tracker helpers     42      ghost outlines/side-edge bases cover every
+  region picking      42-51   SketchUp-parity face splitting: a drawn
+                              coplanar shape on a Body face resolves the
+                              click's 3D point to a region (inner disc /
+                              outer ring / edge-clipped, closed loose
+                              wires too); region pulls Pad and pushes
+                              Pocket in the SAME Body with exact
+                              area x distance volumes; an inner-region
+                              push clamps at the back face and ThroughAll
+                              opens a shaped hole; no splitter or no pick
+                              point keeps the whole-face behavior
+                              bit-identical; rollback leaves no
+                              helper/binder wreckage, restores Tip and
+                              does NOT hide the splitter (a successful
+                              commit does)
+  tracker helpers     52      ghost outlines/side-edge bases cover every
                               wire of a holed face (prism ghost geometry)
-  Qt key routing      43-46   Ctrl/Alt chords neither swallowed nor typed,
+  Qt key routing      53-56   Ctrl/Alt chords neither swallowed nor typed,
                               Esc ends the waiting-for-a-face state, teardown
                               clears the module session slot
-  uppercut hook       47      mark_active/mark_inactive fire through a fake
+  uppercut hook       57      mark_active/mark_inactive fire through a fake
                               toolstate and no-op cleanly without Uppercut
-  command wiring      48      static xref: Activated aborts the previous
+  command wiring      58      static xref: Activated aborts the previous
                               session and consumes the selection, the arming
                               click does not zero-commit, toolstate hooks sit
-                              on the start/teardown funnels
+                              on the start/teardown funnels, the click's 3D
+                              pick point threads into controller.start
 """
 import math
 import os
@@ -96,7 +111,7 @@ from freecad.PushPullWB import face_utils  # noqa: E402
 from freecad.PushPullWB import geom  # noqa: E402
 from freecad.PushPullWB.drag_controller import PushPullController  # noqa: E402
 
-EXPECTED_CHECKS = 48
+EXPECTED_CHECKS = 58
 V = App.Vector
 
 #: exact expected volumes for the seeded-Body checks (40x30 rectangle with
@@ -886,6 +901,254 @@ def _c(fx):
     fx.doc.recompute()
 
 
+# -- region picking (SketchUp-parity face splitting) -----------------------
+
+#: exact region areas for the 40x30 region plate with a r=6 drawn disc
+DISC_AREA = math.pi * 36
+RING_AREA = 1200 - DISC_AREA
+
+
+@check("region: coplanar_splitters finds the drawn disc, skips consumed helpers")
+def _c(fx):
+    # a fresh 40x30x10 plate Body, offset to x=100 so its planes stay clear
+    # of the other fixtures, with a SketchLayer-style drawn disc lying flat
+    # on its top face
+    fx.rbody = fx.doc.addObject("PartDesign::Body", "RegionPlate")
+    fx.rbox = fx.rbody.newObject("PartDesign::AdditiveBox", "RegionBox")
+    fx.rbox.Length, fx.rbox.Width, fx.rbox.Height = 40, 30, 10
+    fx.rbox.Placement = App.Placement(V(100, 0, 0), App.Rotation())
+    fx.disc = fx.doc.addObject("Part::Feature", "DrawnDisc")
+    fx.disc.Shape = Part.Face(Part.Wire(Part.Edge(
+        Part.Circle(V(120, 15, 10), V(0, 0, 1), 6))))
+    fx.doc.recompute()
+    fx.rtop = face_by_normal(fx.rbox.Shape, V(0, 0, 1))
+    pick = face_utils.validate_pick(fx.rbox, fx.rtop)
+    spl = face_utils.coplanar_splitters(
+        fx.doc, fx.rbody, fx.rbox, pick["face"], pick["normal"])
+    ok(len(spl) == 1 and spl[0][0] is fx.disc,
+       "exactly the drawn disc, got %r" % [o.Name for o, _ in spl])
+    ok(len(spl[0][1]) == 1, "one coplanar face")
+    approx(spl[0][1][0].Area, DISC_AREA, 1e-6, "the disc face itself")
+    # an object a SubShapeBinder points at is a helper a previous commit
+    # already consumed -- it must never come back as a splitter
+    helper = fx.doc.addObject("Part::Feature", "ConsumedHelper")
+    helper.Shape = Part.makePlane(5, 5, V(105, 5, 10))
+    marker = fx.doc.addObject("PartDesign::SubShapeBinder", "MarkBinder")
+    marker.Support = [(helper, ("Face1",))]
+    fx.doc.recompute()
+    spl2 = face_utils.coplanar_splitters(
+        fx.doc, fx.rbody, fx.rbox, pick["face"], pick["normal"])
+    ok([o for o, _ in spl2] == [fx.disc], "binder-referenced helper excluded")
+    fx.doc.removeObject(marker.Name)
+    fx.doc.removeObject(helper.Name)
+    fx.doc.recompute()
+
+
+@check("region: resolve_region picks inner disc or outer ring by the point")
+def _c(fx):
+    pick = face_utils.validate_pick(fx.rbox, fx.rtop)
+    spl = face_utils.coplanar_splitters(
+        fx.doc, fx.rbody, fx.rbox, pick["face"], pick["normal"])
+    inner, used = face_utils.resolve_region(pick["face"], spl, V(120, 15, 10))
+    approx(inner.Area, DISC_AREA, 1e-6, "inner region is the clipped disc")
+    ok(used == [fx.disc], "inner region bounded by the disc")
+    outer, used2 = face_utils.resolve_region(pick["face"], spl, V(105, 5, 10))
+    approx(outer.Area, RING_AREA, 1e-6, "outer region is the ring")
+    ok(len(outer.Wires) == 2, "ring keeps the hole outline")
+    ok(fx.disc in used2, "outer region also bounded by the disc")
+    ok(face_utils.resolve_region(pick["face"], spl, V(0, 0, 50)) is None,
+       "a point on no region resolves to None (whole-face fallback)")
+
+
+@check("region: a splitter crossing the face edge clips to the overlap")
+def _c(fx):
+    cross = fx.doc.addObject("Part::Feature", "CrossRect")
+    # x 130..150 hangs past the plate edge at 140: common() clips to 10x20
+    cross.Shape = Part.makePlane(20, 20, V(130, 5, 10))
+    fx.doc.recompute()
+    pick = face_utils.validate_pick(fx.rbox, fx.rtop)
+    spl = face_utils.coplanar_splitters(
+        fx.doc, fx.rbody, fx.rbox, pick["face"], pick["normal"])
+    ok(len(spl) == 2, "disc and crossing rectangle both split")
+    region, used = face_utils.resolve_region(pick["face"], spl, V(135, 15, 10))
+    approx(region.Area, 200.0, 1e-6, "clipped to the on-face 10x20 overlap")
+    ok(used == [cross], "bounded by the crossing rectangle")
+    outer, _ = face_utils.resolve_region(pick["face"], spl, V(105, 5, 10))
+    approx(outer.Area, 1200 - DISC_AREA - 200, 1e-6,
+           "outer region loses both splitters' overlap")
+    fx.doc.removeObject(cross.Name)
+    fx.doc.recompute()
+
+
+@check("region: a drawn closed WIRE splits like a face")
+def _c(fx):
+    # SketchLayer commits a closed path that never became a face as a bare
+    # Part.Wire -- it must split just the same (Part.Face over the wire)
+    loop = fx.doc.addObject("Part::Feature", "DrawnLoop")
+    loop.Shape = Part.Wire(Part.makePolygon(
+        [V(102, 2, 10), V(112, 2, 10), V(112, 9, 10), V(102, 9, 10),
+         V(102, 2, 10)]))
+    fx.doc.recompute()
+    pick = face_utils.validate_pick(fx.rbox, fx.rtop)
+    spl = face_utils.coplanar_splitters(
+        fx.doc, fx.rbody, fx.rbox, pick["face"], pick["normal"])
+    ok(loop in [o for o, _ in spl], "wire object recognized as a splitter")
+    region, used = face_utils.resolve_region(pick["face"], spl, V(107, 5, 10))
+    approx(region.Area, 70.0, 1e-6, "region bounded by the drawn loop")
+    ok(used == [loop], "bounded by the wire object")
+    fx.doc.removeObject(loop.Name)
+    fx.doc.recompute()
+
+
+@check("controller: inner-region pull adds exactly region_area x distance")
+def _c(fx):
+    undo_before = fx.doc.UndoCount
+    names = set(o.Name for o in fx.doc.Objects)
+    c = PushPullController(fx.doc)
+    ok(c.start(fx.rbox, fx.rtop, pick_point=V(120, 15, 10))[0], "start")
+    ok(c.region_face is not None, "click inside the disc resolves a region")
+    approx(c.region_face.Area, DISC_AREA, 1e-6, "the disc region")
+    ok(len(c._back_candidates) == 1, "back-face candidates computed")
+    approx(c._back_candidates[0], 10.0, 1e-6, "clamp depth from the region")
+    c.update_distance(5.0)
+    pad = c.commit()
+    ok(pad is not None, "committed: %s" % c.last_message)
+    ok(pad.TypeId == "PartDesign::Pad", "region pull is a Pad")
+    approx(pad.Shape.Volume, 12000 + DISC_AREA * 5, 1e-6,
+           "adds exactly region area x distance")
+    ok(fx.rbody.Tip is pad, "committed in the SAME Body, not a new seed")
+    binder = profile_object(pad)
+    ok(binder.TypeId == "PartDesign::SubShapeBinder", "profile is a binder")
+    helper = binder.Support[0][0]
+    ok(helper.TypeId == "Part::Feature" and helper is not fx.disc,
+       "binder captures a hidden static region feature, not the splitter")
+    ok(fx.doc.UndoCount == undo_before + 1, "one undo step")
+    fx.doc.undo()
+    fx.doc.recompute()
+    ok(set(o.Name for o in fx.doc.Objects) == names,
+       "undo removes pad, binder and region feature")
+    ok(fx.rbody.Tip is fx.rbox, "tip back on the box")
+    approx(fx.rbody.Tip.Shape.Volume, 12000.0, 1e-6, "plate restored")
+
+
+@check("controller: outer ring pull adds ring_area x distance, holed ghost")
+def _c(fx):
+    from freecad.PushPullWB import tracker
+    c = PushPullController(fx.doc)
+    ok(c.start(fx.rbox, fx.rtop, pick_point=V(105, 5, 10))[0], "start")
+    ok(c.region_face is not None, "click outside the disc resolves the ring")
+    approx(c.region_face.Area, RING_AREA, 1e-6, "the ring region")
+    ok(len(tracker.ghost_outlines(c.region_face)) == 2,
+       "drag ghost previews the ring outline including the hole")
+    c.update_distance(6.0)
+    pad = c.commit()
+    ok(pad is not None, "committed: %s" % c.last_message)
+    approx(pad.Shape.Volume, 12000 + RING_AREA * 6, 1e-6,
+           "adds exactly ring area x distance")
+    ok(len(pad.Shape.Solids) == 1, "one fused solid")
+    fx.doc.undo()
+    fx.doc.recompute()
+    ok(fx.rbody.Tip is fx.rbox, "undo restores the plate")
+
+
+@check("controller: partial inner-region push is an exact-Length Pocket")
+def _c(fx):
+    c = PushPullController(fx.doc)
+    ok(c.start(fx.rbox, fx.rtop, pick_point=V(120, 15, 10))[0], "start")
+    c.update_distance(-4.0)
+    pocket = c.commit()
+    ok(pocket is not None, "committed: %s" % c.last_message)
+    ok(pocket.TypeId == "PartDesign::Pocket", "region push is a Pocket")
+    ok(pocket.Type == "Length", "blind region pocket keeps the exact depth")
+    approx(float(pocket.Length), 4.0, 1e-9, "exact drag depth")
+    approx(pocket.Shape.Volume, 12000 - DISC_AREA * 4, 1e-6,
+           "removes exactly region area x depth")
+    fx.doc.undo()
+    fx.doc.recompute()
+
+
+@check("controller: inner-region push-through opens a shaped hole")
+def _c(fx):
+    c = PushPullController(fx.doc)
+    ok(c.start(fx.rbox, fx.rtop, pick_point=V(120, 15, 10))[0], "start")
+    c.update_distance(-9.7)
+    approx(c.distance, -10.0, 1e-9, "snapped onto the plate's back face")
+    c.update_distance(-14.0)
+    approx(c.distance, -10.0, 1e-9, "clamped: cannot push past the back face")
+    pocket = c.commit()
+    ok(pocket is not None, "committed: %s" % c.last_message)
+    ok(pocket.Type == "ThroughAll", "break-through commits ThroughAll")
+    approx(pocket.Shape.Volume, 12000 - DISC_AREA * 10, 1e-6,
+           "shaped hole through the whole plate")
+    ok(len(pocket.Shape.Faces) == 7,
+       "both caps open, cylindrical wall added (got %d faces)"
+       % len(pocket.Shape.Faces))
+    fx.doc.undo()
+    fx.doc.recompute()
+    ok(fx.rbody.Tip is fx.rbox, "undo restores the plate")
+
+
+@check("region: no splitter or no pick point keeps the whole-face behavior")
+def _c(fx):
+    # today's callers pass no pick point: the region logic must not engage
+    c = PushPullController(fx.doc)
+    ok(c.start(fx.rbox, fx.rtop)[0], "start without a pick point")
+    ok(c.region_face is None, "whole face, exactly as before")
+    c.cancel()
+    # splitter lifted off the plane: a pick point alone must not split
+    fx.disc.Placement = App.Placement(V(0, 0, 5), App.Rotation())
+    fx.doc.recompute()
+    c = PushPullController(fx.doc)
+    ok(c.start(fx.rbox, fx.rtop, pick_point=V(120, 15, 10))[0], "start")
+    ok(c.region_face is None, "no coplanar splitter -> whole face")
+    c.update_distance(2.0)
+    pad = c.commit()
+    ok(pad is not None, "committed: %s" % c.last_message)
+    approx(pad.Shape.Volume, 12000 + 1200 * 2, 1e-6, "whole-face pad")
+    ok(profile_object(pad) is fx.rbox,
+       "direct (feature, face) profile -- no binder, identical to before")
+    fx.doc.undo()
+    fx.doc.recompute()
+    fx.disc.Placement = App.Placement()
+    fx.doc.recompute()
+
+
+@check("region: rollback keeps the splitter visible; success hides it")
+def _c(fx):
+    # freecadcmd objects have no ViewObject, so the hide contract is
+    # exercised through a stand-in with the same attribute shape
+    fake = types.SimpleNamespace(
+        ViewObject=types.SimpleNamespace(Visibility=True))
+    names = set(o.Name for o in fx.doc.Objects)
+    undo_before = fx.doc.UndoCount
+    try:
+        # a vertex is not a face: the binder resolves nothing, the commit
+        # must roll back completely
+        commit_mod.commit_region(
+            fx.doc, fx.rbody, Part.Vertex(V(0, 0, 0)), 5.0, splitters=[fake])
+    except commit_mod.CommitError:
+        pass
+    else:
+        raise AssertionError("bogus region shape committed")
+    ok(set(o.Name for o in fx.doc.Objects) == names,
+       "no helper/binder/feature wreckage")
+    ok(fx.doc.UndoCount == undo_before, "no undo step left behind")
+    ok(fx.rbody.Tip is fx.rbox, "tip restored")
+    ok(fake.ViewObject.Visibility is True, "rollback did NOT hide the splitter")
+    pick = face_utils.validate_pick(fx.rbox, fx.rtop)
+    spl = face_utils.coplanar_splitters(
+        fx.doc, fx.rbody, fx.rbox, pick["face"], pick["normal"])
+    inner, _used = face_utils.resolve_region(pick["face"], spl, V(120, 15, 10))
+    feat = commit_mod.commit_region(
+        fx.doc, fx.rbody, inner, 3.0, splitters=[fake])
+    approx(feat.Shape.Volume, 12000 + DISC_AREA * 3, 1e-6, "region pad")
+    ok(fake.ViewObject.Visibility is False,
+       "successful commit hides the splitter (it served as a split line)")
+    fx.doc.undo()
+    fx.doc.recompute()
+    ok(fx.rbody.Tip is fx.rbox, "undo restores the plate")
+
+
 # -- tracker pure helpers (prism ghost geometry) ---------------------------
 
 @check("tracker: ghost outlines/side-edge bases cover every wire")
@@ -1057,6 +1320,16 @@ def _c(fx):
     ok("_tool_finished(" in src[teardown:], "mark_inactive in teardown")
     ok("if _current_session is self" in src[teardown:],
        "teardown clears the session slot")
+    # region picking needs the 3D point of the click: the arming click
+    # resolves it from the view's geometry pick, the auto-start from the
+    # selection's PickedPoints, and both thread it into controller.start
+    ok("_pick_point_3d" in src[button:src.index("elif state == \"UP\"")],
+       "arming click resolves the 3D pick point")
+    ok("getObjectInfo" in src, "pick point comes from the view's geometry pick")
+    ok("PickedPoints" in src[activated:src.index("def abort(")],
+       "auto-start reads the selection's picked point")
+    ok(src.count("pick_point=") >= 2,
+       "both start paths thread the pick point into controller.start")
 
 
 def main():

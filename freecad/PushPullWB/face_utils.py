@@ -162,6 +162,141 @@ def validate_pick(obj, sub_name):
     }
 
 
+#: a candidate region smaller than this (mm2) is boolean noise, not a
+#: clickable region
+REGION_MIN_AREA = 1e-6
+
+#: max distance (mm) from the 3D pick point to a region face for the click
+#: to count as "inside" it -- the pick point comes from FreeCAD's own
+#: geometry pick, so real hits measure ~1e-7 (probed); anything past this
+#: is an unconfident resolve and falls back to the whole face
+REGION_POINT_TOL = 1e-4
+
+
+def coplanar_splitters(doc, body, feature, face, normal, tol=1e-5):
+    """Candidate "splitter" objects for SketchUp-style region picking:
+    drawn shapes lying flat on the picked Body ``face``. Returns a list of
+    ``(obj, [face, ...])`` pairs, where each listed face is a planar face
+    of ``obj`` (or a face built from a loose closed wire of it) coplanar
+    with ``face`` -- same plane within ``tol`` mm, parallel normal either
+    way (the drawn winding is irrelevant, probed: common() keeps the
+    picked face's orientation regardless).
+
+    Only genuine drawn shapes qualify: solids never split, PartDesign/
+    Sketcher/App objects live inside Bodies and never split, an object a
+    SubShapeBinder points at is a hidden helper a previous commit already
+    consumed, and an object hidden in the GUI is invisible to the user so
+    it must not invisibly split (ViewObject is None under freecadcmd --
+    treated as visible).
+    """
+    out = []
+    plane_point = face.CenterOfMass  # on the plane even when inside a hole
+    for obj in doc.Objects:
+        if obj is body or obj is feature:
+            continue
+        if obj.TypeId.startswith(("PartDesign::", "Sketcher::", "App::")):
+            continue
+        shape = getattr(obj, "Shape", None)
+        if shape is None or shape.isNull() or len(shape.Solids) > 0:
+            continue
+        if any(p.TypeId == "PartDesign::SubShapeBinder"
+               for p in getattr(obj, "InList", [])):
+            continue
+        vo = getattr(obj, "ViewObject", None)
+        if vo is not None and not getattr(vo, "Visibility", True):
+            continue
+        faces = list(shape.Faces)
+        if not faces:
+            # a drawn closed loop that never became a face (SketchLayer
+            # commits closed paths as bare wires too) splits just the same
+            for w in shape.Wires:
+                if not w.isClosed():
+                    continue
+                try:
+                    faces.append(Part.Face(w))
+                except Exception:
+                    pass
+        coplanar = []
+        for sf in faces:
+            if not is_planar_face(sf):
+                continue
+            try:
+                sn = face_normal(sf)
+            except Exception:
+                continue
+            if abs(sn.dot(normal)) < 0.9999:
+                continue
+            if abs(sf.CenterOfMass.sub(plane_point).dot(normal)) > tol:
+                continue
+            coplanar.append(sf)
+        if coplanar:
+            out.append((obj, coplanar))
+    return out
+
+
+def resolve_region(face, splitters, point, tol=REGION_POINT_TOL):
+    """Resolve a 3D pick ``point`` on ``face`` to the sub-region bounded by
+    the ``splitters`` (as returned by :func:`coplanar_splitters`) -- the
+    SketchUp behavior where a closed loop drawn on a face splits it into
+    separately pullable pieces. Returns ``(region_face, used_objects)``:
+    the region actually clicked, plus the splitter objects that bounded it
+    (to be hidden after a successful commit). Returns ``None`` when the
+    click resolves to the whole face or cannot be resolved confidently --
+    the caller then keeps today's whole-face behavior.
+
+    Inner regions are ``common(face, splitter_face)`` per splitter (a
+    splitter overlapping the face edge is clipped by the common, probed);
+    the outer region is ``face.cut(all splitter faces)``, which may be
+    several disconnected faces (a band across the face) -- each is its own
+    region. The clicked region is the one whose face contains ``point``
+    (``distToShape``; a region's CenterOfMass can lie outside it, so COM
+    is never used).
+    """
+    probe = Part.Vertex(point)
+    regions = []  # (region_face, used_objects)
+    overlap_faces = []
+    used_all = []
+    for obj, faces in splitters:
+        contributed = False
+        for sf in faces:
+            try:
+                overlap = face.common(sf)
+            except Exception:
+                continue
+            for rf in overlap.Faces:
+                if rf.Area < REGION_MIN_AREA:
+                    continue
+                regions.append((rf, [obj]))
+                contributed = True
+            overlap_faces.append(sf)
+        if contributed:
+            used_all.append(obj)
+    if not regions:
+        return None
+    try:
+        remainder = face.cut(overlap_faces)
+        for rf in remainder.Faces:
+            if rf.Area >= REGION_MIN_AREA:
+                regions.append((rf, used_all))
+    except Exception:
+        pass
+
+    best = None
+    for rf, used in regions:
+        try:
+            d = rf.distToShape(probe)[0]
+        except Exception:
+            continue
+        if d <= tol and (best is None or d < best[0]):
+            best = (d, rf, used)
+    if best is None:
+        return None
+    region = best[1]
+    if region.Area >= face.Area - max(REGION_MIN_AREA, face.Area * 1e-9):
+        return None  # a splitter covering everything: still the whole face
+    return region, best[2]
+
+
 def back_face_distances(face, shape, normal, tol=1e-6):
     """Sorted positive distances (mm) from ``face`` to the candidate "back
     faces" of ``shape`` along the inward ``-normal`` axis -- the depths at

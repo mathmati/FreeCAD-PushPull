@@ -69,6 +69,8 @@ class PushPullController:
         self.face_name = None
         self.origin = None
         self.normal = None
+        self.region_face = None
+        self._region_splitters = []
         self._expected_area = None
         self._expected_com = None
         self._back_candidates = []
@@ -79,9 +81,15 @@ class PushPullController:
         self.ghost = None
 
     # -- pick / start ------------------------------------------------
-    def start(self, obj, sub_name):
+    def start(self, obj, sub_name, pick_point=None):
         """Validate and begin a drag from a (obj, sub_element_name) pick,
         e.g. straight from Gui.Selection or a preselection callback.
+
+        ``pick_point`` is the 3D point actually clicked (from the GUI's
+        geometry pick), when the caller has one. On a Body face with drawn
+        coplanar shapes lying on it, it resolves the click to a REGION of
+        the face (SketchUp's face splitting) -- without it, or when the
+        resolve is unconfident, the drag is the whole face as always.
 
         Returns (True, "ok") on success, or (False, message) on a friendly
         rejection (non-planar face, face not on a Body, etc.) -- the caller
@@ -103,13 +111,32 @@ class PushPullController:
         self.normal = pick["normal"]
         self._expected_area = pick["face"].Area
         self._expected_com = pick["face"].CenterOfMass
+        # SketchUp-parity region picking: shapes drawn flat on this Body
+        # face split it, and the pick point decides which piece is dragged
+        self.region_face = None
+        self._region_splitters = []
+        if not self.standalone and pick_point is not None:
+            try:
+                splitters = face_utils.coplanar_splitters(
+                    self.doc, self.body, self.feature, pick["face"], self.normal)
+                if splitters:
+                    hit = face_utils.resolve_region(
+                        pick["face"], splitters, pick_point)
+                    if hit is not None:
+                        self.region_face, self._region_splitters = hit
+            except Exception:
+                self.region_face, self._region_splitters = None, []
+        drag_face = self.region_face if self.region_face is not None else pick["face"]
         # back-face candidate depths for the push-through clamp, computed
-        # once here at drag start (one cheap OCCT section, never per tick)
+        # once here at drag start (one cheap OCCT section, never per tick).
+        # For a region drag they come from the REGION face, so pushing an
+        # inner region through a plate clamps and opens a shaped hole
+        # exactly like a whole-face push.
         self._back_candidates = []
         if not self.standalone:
             try:
                 self._back_candidates = face_utils.back_face_distances(
-                    pick["face"], self.feature.Shape, self.normal)
+                    drag_face, self.feature.Shape, self.normal)
             except Exception:
                 self._back_candidates = []
         self.active = True
@@ -117,7 +144,7 @@ class PushPullController:
         self.typed_buffer = ""
 
         if self.view is not None and tracker_mod is not None:
-            self.ghost = tracker_mod.FaceGhostTracker(pick["face"])
+            self.ghost = tracker_mod.FaceGhostTracker(drag_face)
             self.ghost.show()
 
         self._update_readout()
@@ -245,6 +272,10 @@ class PushPullController:
             if self.standalone:
                 new_obj = commit_mod.commit_seed_body(
                     self.doc, self.feature, self.face_name, self.normal, distance)
+            elif self.region_face is not None:
+                new_obj = commit_mod.commit_region(
+                    self.doc, self.body, self.region_face, distance,
+                    splitters=self._region_splitters, through=through)
             else:
                 new_obj = commit_mod.commit_pushpull(
                     self.doc, self.body, self.feature, self.face_name, distance,
@@ -283,6 +314,8 @@ class PushPullController:
                 kind = "Extrude"
             else:
                 kind = "Pad" if self.distance >= 0 else "Pocket"
+                if self.region_face is not None:
+                    kind += " (region)"
             typed = f" [typed: {self.typed_buffer}]" if self.typed_buffer else ""
             limited = ""
             if (self.distance < 0 and not self.typed_buffer

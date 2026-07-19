@@ -2,7 +2,7 @@
 <package format="1" xmlns="https://wiki.freecad.org/Package_Metadata">
   <name>PushPull</name>
   <description>SketchUp-style push/pull for FreeCAD. Click a face, drag to extrude or cut, release to commit a normal parametric Pad or Pocket. Type a number for an exact distance. Also extrudes loose faces drawn with SketchLayer or Draft.</description>
-  <version>0.3.0</version>
+  <version>0.4.0</version>
   <date>2026-07-11</date>
   <maintainer email="177616452+mathmati@users.noreply.github.com">mathmati</maintainer>
   <license file="LICENSE">MIT</license>
